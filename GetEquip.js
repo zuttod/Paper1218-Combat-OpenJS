@@ -69,8 +69,20 @@
     // -----------------------------------------------------------------------
     // 运行时状态
     // -----------------------------------------------------------------------
-    var definitions = {};   // "slot:id" -> definition
+    // 修复（本机实测的「每次启动 /equip 列表都不一样」）：
+    // 原实现把各装备脚本引擎里的 JS 对象直接存进 definitions，之后又反复读它们的
+    // id / slot / name / aliases / heartbeat —— 跨引擎读 JS 对象属性不可靠
+    // （契约 M-1 已注明），于是键算错、列表出现「少一件 + 多一件重复」。
+    // 现在只存「本引擎自己的快照对象」，字段全部是注册那一刻拷贝好的基本值。
+    var definitions = {};   // "slot:id" -> 定义快照
     var lookup = {};        // "slot:归一化名称" -> definition
+
+    var ConcurrentHashMap = Java.type("java.util.concurrent.ConcurrentHashMap");
+    var ReentrantLock = Java.type("java.util.concurrent.locks.ReentrantLock");
+    // 心跳单独放 Java 并发容器：装备脚本每 20 tick 从自己的线程调用 heartbeat，
+    // 不再去改 JS 对象的属性，避免与主线程的读并发。
+    var heartbeats = new ConcurrentHashMap();
+    var registryLock = new ReentrantLock();
 
     // -----------------------------------------------------------------------
     // 工具函数
@@ -97,12 +109,13 @@
         return SLOT_DISPLAY_NAMES[normalized] || normalized;
     }
 
+    // 心跳存在 Java 容器里，键为 "slot:id"；没有心跳记录的装备视为永不过期。
     function isAliveDefinition(def) {
         if (!def) return false;
-        if (typeof def.heartbeat === "number" && def.heartbeat > 0) {
-            return (Date.now() - def.heartbeat) <= HEARTBEAT_TIMEOUT_MS;
-        }
-        return true;
+        var hb = null;
+        try { hb = heartbeats.get(makeDefinitionKey(def.slot, def.id)); } catch (e) { hb = null; }
+        if (hb == null) return true;
+        return (Date.now() - Number(hb)) <= HEARTBEAT_TIMEOUT_MS;
     }
 
     function rebuildLookup() {
@@ -126,41 +139,89 @@
 
     function purgeExpiredDefinitions() {
         var changed = false;
-        for (var key in definitions) {
-            if (!definitions.hasOwnProperty(key)) continue;
-            if (!isAliveDefinition(definitions[key])) {
-                delete definitions[key];
-                changed = true;
+        registryLock.lock();
+        try {
+            for (var key in definitions) {
+                if (!definitions.hasOwnProperty(key)) continue;
+                if (!isAliveDefinition(definitions[key])) {
+                    delete definitions[key];
+                    try { heartbeats.remove(key); } catch (ignored) { }
+                    changed = true;
+                }
             }
+            if (changed) rebuildLookup();
+        } finally {
+            registryLock.unlock();
         }
-        if (changed) rebuildLookup();
+    }
+
+    // 把跨引擎的 aliases（JS 数组或 java.util.List 都可能有）拷贝成本引擎的字符串数组
+    function copyAliases(source) {
+        var out = [];
+        try {
+            if (source == null) return out;
+            var n = 0;
+            if (typeof source.size === "function") n = source.size();
+            else if (typeof source.length === "number") n = source.length;
+            for (var i = 0; i < n; i++) {
+                var item = (typeof source.get === "function") ? source.get(i) : source[i];
+                if (item != null) out.push(String(item));
+            }
+        } catch (e) { }
+        return out;
+    }
+
+    // 把跨引擎的 create() 立刻包成真正的 Java 适配器对象（与 CallBoss 的 spawn 句柄同一手法），
+    // 之后只通过 Java 方法调用它，不再保存外部引擎的 JS 函数引用。
+    function makeCreateHandle(fn) {
+        var Supplier = Java.type("java.util.function.Supplier");
+        var Adapter = Java.extend(Supplier, {
+            get: function () { return fn(); }
+        });
+        return new Adapter();
     }
 
     // -----------------------------------------------------------------------
     // 注册表 API
     // -----------------------------------------------------------------------
     function register(def) {
-        if (!def || !def.id || !def.name || !def.slot || typeof def.create !== "function") {
-            log.warn("GetEquip.register 参数不完整，已忽略。需要 id / slot / name / create()。");
+        try {
+            if (!def || !def.id || !def.name || !def.slot || typeof def.create !== "function") {
+                log.warn("GetEquip.register 参数不完整，已忽略。需要 id / slot / name / create()。");
+                return false;
+            }
+
+            // 关键修复：注册时一次性把外部引擎对象的字段「快照」成本引擎的值。
+            var id = String(def.id);
+            var slot = normalizeSlot(def.slot);
+            var name = String(def.name);
+            var safe = {
+                id: id,
+                slot: slot,
+                name: name,
+                aliases: copyAliases(def.aliases),
+                createHandle: makeCreateHandle(def.create)
+            };
+            var key = makeDefinitionKey(slot, id);
+
+            registryLock.lock();
+            try {
+                if (definitions[key]) {
+                    log.info("GetEquip 重新注册装备：" + name + " (" + slot + ":" + id + ")");
+                } else {
+                    log.info("GetEquip 注册装备：" + name + " (" + slot + ":" + id + ")");
+                }
+                definitions[key] = safe;
+                heartbeats.put(key, Date.now());
+                rebuildLookup();
+            } finally {
+                registryLock.unlock();
+            }
+            return true;
+        } catch (e) {
+            log.error("GetEquip.register 异常：" + e + (e && e.stack ? "\n" + e.stack : ""));
             return false;
         }
-
-        def.id = String(def.id);
-        def.slot = normalizeSlot(def.slot);
-        def.name = String(def.name);
-        if (!def.aliases) def.aliases = [];
-        def.heartbeat = Date.now();
-
-        var key = makeDefinitionKey(def.slot, def.id);
-        if (definitions[key]) {
-            log.info("GetEquip 重新注册装备：" + def.name + " (" + def.slot + ":" + def.id + ")");
-        } else {
-            log.info("GetEquip 注册装备：" + def.name + " (" + def.slot + ":" + def.id + ")");
-        }
-
-        definitions[key] = def;
-        rebuildLookup();
-        return true;
     }
 
     function unregister(slotOrDef, idOrDef) {
@@ -176,15 +237,23 @@
         }
 
         var key = makeDefinitionKey(slot, id);
-        if (definitions[key]) {
-            delete definitions[key];
-            rebuildLookup();
+        registryLock.lock();
+        try {
+            if (definitions[key]) {
+                delete definitions[key];
+                try { heartbeats.remove(key); } catch (ignored) { }
+                rebuildLookup();
+            }
+        } finally {
+            registryLock.unlock();
         }
     }
 
     function heartbeat(slot, id) {
-        var def = definitions[makeDefinitionKey(slot, id)];
-        if (def) def.heartbeat = Date.now();
+        var key = makeDefinitionKey(slot, id);
+        if (definitions[key] != null) {
+            try { heartbeats.put(key, Date.now()); } catch (ignored) { }
+        }
     }
 
     function get(slot, id) {
@@ -263,7 +332,7 @@
 
         var item = null;
         try {
-            item = def.create();
+            item = def.createHandle.get();
         } catch (e) {
             log.error("GetEquip 构建装备[" + def.name + "]失败：" + e
                     + (e && e.stack ? "\n" + e.stack : ""));

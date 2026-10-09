@@ -1,26 +1,41 @@
 /*
- * Sharpshooter.js —— 自定义 BOSS「神射手」（OpenJS 1.5.0 / Paper 1.21.8）
+ * SharpshooterElite.js —— 自定义 BOSS「神射手_精英」（OpenJS 1.5.0 / Paper 1.21.8）
  *
- * 获取方式：/call boss 神射手
- * 召唤方式：手持名为「神射手」的绿宝石右键地面 → 6 秒倒计时 → spawn
+ * 来源：本脚本由 Sharpshooter.js（神射手）派生。两个 BOSS 完全独立、互不干扰：
+ *   · 独立 BOSS_ID / 显示名 / 别名（sharpshooter_elite）
+ *   · 独立 PDC 键与 BossBar 键（sharpshooter_elite_boss_type / sharpshooter_elite_bar）
+ *   · 独立实体 tag（sharpshooter_elite_boss）与**独立箭矢 tag**（sharpshooter_elite_arrow）
+ *     —— 箭矢 tag 必须分开，否则两个脚本会互相清理、互相认领对方的箭
+ *   · 独立运行时状态表（各自脚本引擎内的 activeBosses / trackedArrows）
+ *
+ * 获取方式：/call boss 神射手_精英
+ * 召唤方式：手持名为「神射手_精英」的绿宝石右键地面 → 6 秒倒计时 → spawn
+ *
+ * 相对「神射手」的全部改动：
+ *   1. 生命值 100 → 300；攻击冷却 6 秒 → 2 秒（120 → 40 tick）；
+ *      皮革头盔 / 胸甲 附魔 弹射物保护 III，皮革裤腿 / 靴子 附魔 保护 III
+ *   2. 闪避由「90 秒 1 次」改为「一次 3 发」：可连续抵挡 3 次伤害，3 发用尽后进 90 秒冷却
+ *   3. 猛毒箭的中毒与失明持续时间 2 秒 → 10 秒
+ *   5. 猛毒箭蓄力特效改为「绿色螺旋」，禁锢箭蓄力特效改为「紫色方框」
+ *   6. 两种特殊箭的瞄准时间 2 秒 → 0.75 秒（大幅缩短，整体更偏输出）
+ *   7. 箭矢穿透一切实体：不会被其他自定义 BOSS 挡下，也不会误伤它们
  *
  * 机制摘要：
- *   外观：真实流浪者（Stray）本体，头 / 胸 / 腿 / 脚 全套染白皮革甲，主手 弓
- *   数据：HP 100；移动速度 0.24 格/tick（玩家步行约 0.215，略快约 11%）；
+ *   外观：真实流浪者（Stray）本体，头 / 胸 / 腿 / 脚 全套染白皮革甲（附魔见上），主手 弓
+ *   数据：HP 300；移动速度 0.24 格/tick（玩家步行约 0.215，略快约 11%）；
  *         击退抗性 1.0（完全免疫击退）；免疫火焰 / 爆炸 / 摔落等环境伤害，
  *         只接受玩家造成的伤害；白天不会着火（逐 tick 清火焰 + 取消火焰伤害）
  *   走位：远程放风筝 —— 玩家近于 6 格后退、远于 16 格靠近、中距离横向绕行
- *   弓箭（主武器，攻击冷却 6 秒，每次从四种箭里随机挑一种，不连续重复）：
- *     · 连射箭：一次 3 支箭，无视受击间隔（3 段伤害都会生效），单支 4 点；
- *               伤害较为均衡，可被盾牌防御
- *     · 爆裂箭：1 支带红色火焰尾迹的箭；命中处产生**不破坏地形**的爆炸（半径 3），
- *               伤害偏低；被炸到、真的掉血的玩家会被击飞；可被盾牌防御
- *     · 猛毒箭：瞄准 2 秒（绿色毒气蓄力）后射 1 支带绿色毒气尾迹的箭；
- *               命中并造成伤害的玩家 中毒 IV + 失明 2 秒；伤害偏低；可被盾牌防御
- *     · 禁锢箭：瞄准 2 秒（紫色粒子 + 警示线警告目标）后射 1 支紫色尾迹的箭；
- *               命中并造成伤害的玩家 缓慢 V 5 秒；伤害偏高；可被盾牌防御
- *   闪避：每 90 秒拥有一次「抵挡任意伤害来源」的机会 —— 触发时该次伤害无效、
- *         同时瞬移到远离玩家的有效落点并留下一团白色烟雾；触发后才开始 90 秒冷却
+ *   弓箭（主武器，攻击冷却 2 秒，每次从四种箭里随机挑一种，不连续重复）：
+ *     · 连射箭：一次 3 支箭，无视受击间隔（3 段伤害都会生效），单支 4 点
+ *     · 爆裂箭：1 支带红色火焰尾迹的箭；命中处产生**不破坏地形**的爆炸（半径 3）
+ *     · 猛毒箭：绿色螺旋蓄力 0.75 秒后射 1 支带绿色毒气尾迹的箭；
+ *               命中并造成伤害的玩家 中毒 IV + 失明 **10 秒**
+ *     · 禁锢箭：紫色方框蓄力 0.75 秒（另有警示线锁定目标）后射 1 支紫色尾迹的箭；
+ *               命中并造成伤害的玩家 缓慢 V 5 秒
+ *     以上箭矢均可被盾牌防御
+ *   闪避：拥有 3 发「抵挡任意伤害来源」的机会 —— 触发时该次伤害无效，同时瞬移到
+ *         远离玩家的有效落点并留下一团白色烟雾；3 发全部用尽后进入 90 秒冷却
  *
  * 契约依据：《OpenJS脚本数据契约.md》v1.0.0
  *   - 第 2 节  IIFE + "use strict" 作用域隔离
@@ -53,6 +68,7 @@
     var NamespacedKey = Java.type("org.bukkit.NamespacedKey");
     var PersistentDataType = Java.type("org.bukkit.persistence.PersistentDataType");
     var Attribute = Java.type("org.bukkit.attribute.Attribute");
+    var Enchantment = Java.type("org.bukkit.enchantments.Enchantment");
     var Particle = Java.type("org.bukkit.Particle");
     var Sound = Java.type("org.bukkit.Sound");
     var PotionEffect = Java.type("org.bukkit.potion.PotionEffect");
@@ -67,35 +83,39 @@
 
     // M-5：Java.type(...) 返回 Nashorn StaticClass，不能当 java.lang.Class 传给 world.spawn。
     var EntityClass = Class.forName("org.bukkit.entity.Entity");
+    // 注意：instanceof 的右操作数必须是 Java.type 的结果！
+    // Class.forName(...) 得到的是 java.lang.Class，用 instanceof 会抛 TypeError 并被
+    // try/catch 吞掉变成静默失效（踩过一次）。
+    var EnemyClass = Java.type("org.bukkit.entity.Enemy");
     var StrayClass = Class.forName("org.bukkit.entity.Stray");
     var ArrowClass = Class.forName("org.bukkit.entity.Arrow");
 
     // -----------------------------------------------------------------------
     // 数值配置
     // -----------------------------------------------------------------------
-    var BOSS_ID = "sharpshooter";
-    var BOSS_NAME = "神射手";
-    // 注意：加 "神射手" 是为了让 /call boss 神射手 在「神射手_精英」存在时仍然精确命中本体
-    //（CallBoss 的别名精确匹配优先于前缀匹配，否则两者会前缀冲突）。
-    var BOSS_ALIASES = ["神射手", "神射", "marksman", "sharpshooter", "archer"];
+    var BOSS_ID = "sharpshooter_elite";
+    var BOSS_NAME = "神射手_精英";
+    // 别名刻意不与「神射手」的别名（神射 / marksman / sharpshooter / archer）重合
+    var BOSS_ALIASES = ["精英射手", "elite", "elite_archer", "sharpshooterelite"];
     var BOSS_LORE = [
-        "生命值：100",
-        "全套染白皮革甲，手持弓（流浪者本体）",
+        "生命值：300",
+        "全套染白皮革甲（头/胸 弹射物保护 III，腿/脚 保护 III），手持弓（流浪者本体）",
         "免疫击退；免疫火焰、爆炸、摔落等环境伤害",
         "只接受玩家造成的伤害",
         "————————————————",
-        "弓箭（攻击冷却 6 秒，四选一）：",
+        "弓箭（攻击冷却 2 秒，四选一；箭矢可穿透其他自定义 BOSS，不会被挡住也不会误伤）：",
         "· 连射箭：一次 3 支箭，无视受击间隔，伤害均衡",
         "· 爆裂箭：红色火焰箭，命中处不破坏地形的爆炸 + 击飞掉血的玩家，伤害偏低",
-        "· 猛毒箭：瞄准 2 秒，命中掉血的玩家 中毒 IV + 失明 2 秒，伤害偏低",
-        "· 禁锢箭：瞄准 2 秒（紫色警示线锁定），命中掉血的玩家 缓慢 V 5 秒，伤害偏高",
+        "· 猛毒箭：绿色螺旋蓄力 0.75 秒，命中掉血的玩家 中毒 IV + 失明 10 秒，伤害偏低",
+        "· 禁锢箭：紫色方框蓄力 0.75 秒（另有警示线锁定），命中掉血的玩家 缓慢 V 5 秒，伤害偏高",
         "以上箭矢均可被盾牌防御",
         "————————————————",
-        "闪避：每 90 秒一次，抵挡任意一次伤害并瞬移远离玩家（白烟）"
+        "闪避：一次拥有 3 发，每发都能抵挡任意一次伤害并瞬移远离玩家（白烟）；3 发用尽后冷却 90 秒",
+        "提示：本 BOSS 不发送任何文字提示，只靠粒子与音效传达意图"
     ];
 
     // 生命 / 移动
-    var MAX_HEALTH = 100.0;
+    var MAX_HEALTH = 300.0;               // 精英改动：100 → 300
     var KNOCKBACK_RESISTANCE = 1.0;       // 需求：免疫击退（属性满值 = 完全免疫）
     // 速度：玩家步行速度属性 0.1 ≈ 0.215 格/tick。
     // 本 BOSS 由脚本逐 tick 位移移动（无 AI 实体不吃移动速度属性），
@@ -119,10 +139,13 @@
     var MAX_FACE_PITCH = 35.0;            // 抬头 / 低头最大角度，避免怪异姿势
 
     // 弓箭公共参数
-    var ATTACK_COOLDOWN_TICKS = 120;      // 需求：攻击冷却 6 秒
+    var ATTACK_COOLDOWN_TICKS = 40;       // 精英改动：攻击冷却 6 秒 → 2 秒（大幅度缩短）
     var ATTACK_MAX_RANGE = 26.0;          // 超过此距离不主动开火（仍会追击）
     var ATTACK_MIN_RANGE = 2.5;           // 贴脸时先拉开距离再射
     var ARROW_LIFE_TICKS = 120;           // 箭矢最长存活 tick（兜底清理）
+    // 精英改动：箭矢穿透一切实体 —— 其他自定义 BOSS 挡在弹道上时既不会拦下箭矢，
+    // 也不会被误伤（原版伤害本来就是 0，玩家命中由 checkArrowPlayerHit 逐 tick 判定）。
+    var ARROW_PIERCE_LEVEL = 127;
     var ARROW_GRAVITY = 0.05;             // 原版箭矢重力，用于瞄准补偿
     var ARROW_HIT_RADIUS = 1.5;           // 逐 tick 兜底命中半径（防止高速穿透漏判）
     var ARROW_HIT_VERTICAL = 1.8;
@@ -154,25 +177,37 @@
 
     // 猛毒箭：绿色毒气尾迹，瞄准 2 秒；中毒 IV + 失明 2 秒；伤害偏低
     var POISON_DAMAGE = 4.0;
-    var POISON_AIM_TICKS = 40;            // 需求：瞄准 2 秒
+    var POISON_AIM_TICKS = 15;            // 精英改动：瞄准 2 秒 → 0.75 秒（大幅缩短，更偏输出）
     var POISON_SPEED = 1.8;
-    var POISON_EFFECT_TICKS = 40;         // 需求：中毒 / 失明 2 秒
+    var POISON_EFFECT_TICKS = 200;        // 精英改动：中毒 / 失明 2 秒 → 10 秒
     var POISON_AMPLIFIER = 3;             // amplifier 3 = 中毒 IV
     var POISON_BLINDNESS_AMPLIFIER = 0;   // 失明 I
+    // 精英改动：毒箭蓄力特效 = 绿色螺旋
+    var POISON_SPIRAL_RADIUS = 0.85;      // 螺旋半径（格）
+    var POISON_SPIRAL_HEIGHT = 2.4;       // 螺旋总高（格）
+    var POISON_SPIRAL_POINTS = 10;        // 每帧采样点数
+    var POISON_SPIRAL_SPIN = 0.35;        // 每 tick 旋转弧度
 
     // 禁锢箭：紫色尾迹 + 警示线，瞄准 2 秒；缓慢 V 5 秒；伤害偏高
     var BINDING_DAMAGE = 8.0;
-    var BINDING_AIM_TICKS = 40;           // 需求：瞄准 2 秒
+    var BINDING_AIM_TICKS = 15;           // 精英改动：瞄准 2 秒 → 0.75 秒（大幅缩短）
     var BINDING_SPEED = 2.1;
     var BINDING_SLOW_TICKS = 100;         // 需求：缓慢 5 秒
     var BINDING_SLOW_AMPLIFIER = 4;       // amplifier 4 = 缓慢 V
     var BINDING_LINE_POINTS = 14;         // 警示线粒子点数
+    // 精英改动：禁锢箭蓄力特效 = 紫色方框（上、下两个方框拼成一个盒子）
+    var BINDING_BOX_HALF = 1.6;           // 方框半边长（格）
+    var BINDING_BOX_LOW_Y = 0.15;         // 下方框相对脚底高度
+    var BINDING_BOX_HIGH_Y = 2.2;         // 上方框相对脚底高度
+    var BINDING_BOX_POINTS_PER_EDGE = 5;  // 每条边的采样点数
 
     // 收招（射完之后的短暂硬直时间，用来做收弓动作）
     var RECOVER_TICKS = 10;
 
     // 闪避：每 90 秒一次，抵挡任意伤害来源 + 瞬移远离玩家
-    var DODGE_COOLDOWN_TICKS = 1800;      // 需求：90 秒
+    // 精英改动：闪避改为「3 发」—— 每抵挡 1 次消耗 1 发，3 发全部用尽后才进入 90 秒冷却
+    var DODGE_CHARGES = 3;
+    var DODGE_COOLDOWN_TICKS = 1800;      // 需求：90 秒（精英版在 3 发用尽后才开始计时）
     // 需求：闪避距离要远、以「远离玩家」为主（便于和其它自定义 BOSS 同场时的脱战定位）
     var DODGE_MIN_DISTANCE = 12.0;
     var DODGE_MAX_DISTANCE = 24.0;
@@ -189,10 +224,179 @@
     var DEATH_SEQUENCE_TICKS = 30;
 
     // Tag / PDC key 必须带 BOSS id 前缀，避免跨 BOSS 冲突
-    var BOSS_TAG = "sharpshooter_boss";
-    var ARROW_TAG = "sharpshooter_arrow";
-    var bossKey = new NamespacedKey(plugin, "sharpshooter_boss_type");
-    var barKey = new NamespacedKey(plugin, "sharpshooter_bar");
+    // 精英独立命名：实体 tag、箭矢 tag、PDC 键、BossBar 键全部与本体不同。
+    // 箭矢 tag 尤其重要 —— 两个脚本都会周期性清理「带自己 tag 的箭」，共用 tag 会互删。
+    var BOSS_TAG = "sharpshooter_elite_boss";
+    var ARROW_TAG = "sharpshooter_elite_arrow";
+    var bossKey = new NamespacedKey(plugin, "sharpshooter_elite_boss_type");
+    var barKey = new NamespacedKey(plugin, "sharpshooter_elite_bar");
+
+    // ---- 「土匪」阵营（与 无爵骑士_精英 / 流浪术士_精英 同一阵营）----
+    var FACTION_TAG = "bandit_faction";
+    var FACTION_TEAM = "bandit";
+    var FACTION_PREFIX = ChatColor.DARK_RED + "[土匪] " + ChatColor.RESET;
+
+    function joinFactionTeam(entity) {
+        try {
+            var sb = Bukkit.getScoreboardManager().getMainScoreboard();
+            var team = sb.getTeam(FACTION_TEAM);
+            if (team == null) {
+                team = sb.registerNewTeam(FACTION_TEAM);
+                team.setDisplayName("[土匪]");
+            }
+            team.setPrefix(FACTION_PREFIX);
+            var entry = String(entity.getUniqueId().toString());
+            if (!team.hasEntry(entry)) team.addEntry(entry);
+        } catch (e) {
+            logError("SharpshooterElite 加入土匪阵营失败", e);
+        }
+    }
+
+    // ---- 精英改动：阵营友伤 / 反击 ----
+    var RETALIATE_MEMORY_TICKS = 200;      // 挨打后 10 秒内保持反击目标
+    var RETALIATE_COOLDOWN_TICKS = 30;     // 每 1.5 秒还击一次
+    var RETALIATE_DAMAGE = 5.0;            // 反击伤害（约等于一支连射箭）
+
+    function isFactionAlly(entity) {
+        try {
+            if (entity == null) return false;
+            return entity.getScoreboardTags().contains(FACTION_TAG);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function markRetaliate(boss, attacker) {
+        try {
+            if (attacker == null || !attacker.isValid()) return;
+            if (String(attacker.getUniqueId().toString()) === boss.uuid) return;
+            if (boss.nextRetaliateHitTick == null) boss.nextRetaliateHitTick = 0;
+            boss.retaliateTarget = attacker;
+            boss.retaliateUntilTick = globalTick + RETALIATE_MEMORY_TICKS;
+        } catch (ignored) { }
+    }
+
+    function resolveRetaliateTarget(boss) {
+        var t = boss.retaliateTarget;
+        if (t == null) return null;
+        try {
+            if (!t.isValid() || t.isDead()) { boss.retaliateTarget = null; return null; }
+        } catch (e) {
+            boss.retaliateTarget = null;
+            return null;
+        }
+        if (globalTick > boss.retaliateUntilTick) { boss.retaliateTarget = null; return null; }
+        return t;
+    }
+
+    // ---- 精英改动：是否主动攻击「非同阵营」（为 BOSS 之间的战斗做准备）----
+    // 默认 false = 只反击、不主动出击；可用 /bandit attack on|off 运行时切换
+    //（真正的开关由 BanditTrioElite.js 通过 getShared("BanditFaction") 持有并持久化）。
+    var FALLBACK_ATTACK_NON_FACTION = false;
+    // 敌对目标识别：原版敌对生物（Enemy）+ 按 tag 约定的自定义生物/自定义 BOSS。
+    // 以后新增自定义生物，打上 custom_hostile 标记或让 tag 以 _boss 结尾即可自动纳入。
+    var HOSTILE_TAGS_EXACT = ["custom_hostile"];
+    var HOSTILE_TAG_SUFFIXES = ["_boss"];
+
+    function isAggressiveAgainstNonFaction() {
+        try {
+            var api = getShared("BanditFaction");
+            if (api != null && typeof api.isAggressive === "function") {
+                return api.isAggressive() === true;
+            }
+        } catch (e) { }
+        return FALLBACK_ATTACK_NON_FACTION;
+    }
+
+    function isHostileEntity(entity) {
+        try {
+            if (entity == null || !entity.isValid() || entity.isDead()) return false;
+            if (entity instanceof PlayerClass) return false;
+            if (isFactionAlly(entity)) return false;
+            if (entity instanceof EnemyClass) return true;
+            var tags = entity.getScoreboardTags();
+            var it = tags.iterator();
+            while (it.hasNext()) {
+                var tag = String(it.next());
+                for (var i = 0; i < HOSTILE_TAGS_EXACT.length; i++) {
+                    if (tag === HOSTILE_TAGS_EXACT[i]) return true;
+                }
+                for (var j = 0; j < HOSTILE_TAG_SUFFIXES.length; j++) {
+                    var suf = HOSTILE_TAG_SUFFIXES[j];
+                    if (tag.length > suf.length
+                            && tag.substring(tag.length - suf.length) === suf) return true;
+                }
+            }
+        } catch (e) { }
+        return false;
+    }
+
+    function findNearestHostileEntity(boss) {
+        var best = null;
+        var bestDist = TARGET_RANGE * TARGET_RANGE;
+        try {
+            var it = boss.world.getEntitiesByClass(EntityClass).iterator();
+            while (it.hasNext()) {
+                var e = it.next();
+                if (!isHostileEntity(e)) continue;
+                var d = e.getLocation().distanceSquared(boss.carrier.getLocation());
+                if (d < bestDist) { bestDist = d; best = e; }
+            }
+        } catch (e2) { }
+        return best;
+    }
+
+    function pickHostileIfNearer(boss, playerTarget) {
+        try {
+            var hostile = findNearestHostileEntity(boss);
+            if (hostile == null) return null;
+            if (playerTarget == null) return hostile;
+            var loc = boss.carrier.getLocation();
+            var dh = hostile.getLocation().distanceSquared(loc);
+            var dp = playerTarget.getLocation().distanceSquared(loc);
+            return (dh < dp) ? hostile : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // 反击：保持射击距离，按冷却「放一箭」（直接结算伤害 + 箭迹粒子 + 弓弦音效）
+    function updateRetaliate(boss, foe) {
+        try {
+            var loc = boss.carrier.getLocation();
+            var tl = foe.getLocation();
+            var dx = tl.getX() - loc.getX();
+            var dz = tl.getZ() - loc.getZ();
+            var dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist < KEEP_DISTANCE || dist > PREFERRED_RANGE) {
+                updateMovement(boss, foe);
+            } else {
+                faceTarget(boss, tl);
+            }
+            if (globalTick < boss.nextRetaliateHitTick) return;
+            if (dist > ATTACK_MAX_RANGE || !hasLineOfSight(boss, tl)) return;
+            boss.nextRetaliateHitTick = globalTick + RETALIATE_COOLDOWN_TICKS;
+            try { foe.damage(RETALIATE_DAMAGE, boss.carrier); } catch (ignored) { }
+            playSoundSafe(boss.world, loc, Sound.ENTITY_ARROW_SHOOT, 1.0, 1.1);
+            var eye = boss.carrier.getEyeLocation();
+            for (var i = 1; i <= 6; i++) {
+                var t = i / 6.0;
+                spawnParticleSafe(boss.world, Particle.CRIT, new Location(boss.world,
+                    eye.getX() + (tl.getX() - eye.getX()) * t,
+                    eye.getY() + 1.0 + (tl.getY() - eye.getY()) * t,
+                    eye.getZ() + (tl.getZ() - eye.getZ()) * t),
+                    1, 0.0, 0.0, 0.0, 0.0);
+            }
+        } catch (e) {
+            logError("SharpshooterElite 反击异常", e);
+        }
+    }
+
+    // 精英改动：隐藏全部文字提示（聊天栏 + 动作栏），只保留粒子与音效。改回 false 可恢复。
+    var HIDE_ALL_TEXT = true;
+    // 精英改动：皮革甲附魔等级 —— 头盔 / 胸甲 弹射物保护 III，裤腿 / 靴子 保护 III
+    var ARMOR_PROJECTILE_PROTECTION_LEVEL = 3;
+    var ARMOR_PROTECTION_LEVEL = 3;
 
     // 箭矢种类标识
     var KIND_VOLLEY = "volley";
@@ -213,6 +417,7 @@
         String(Material.LEATHER_HELMET), String(Material.LEATHER_CHESTPLATE),
         String(Material.LEATHER_LEGGINGS), String(Material.LEATHER_BOOTS),
         String(Material.BOW), String(Material.EMERALD), String(Material.SHIELD),
+        String(Enchantment.PROTECTION), String(Enchantment.PROJECTILE_PROTECTION),
         String(Particle.CRIT), String(Particle.FLAME), String(Particle.SMALL_FLAME),
         String(Particle.LARGE_SMOKE), String(Particle.SMOKE), String(Particle.CLOUD),
         String(Particle.SOUL), String(Particle.ITEM_SLIME), String(Particle.WITCH),
@@ -271,7 +476,7 @@
                 try {
                     current[i].fn();
                 } catch (e) {
-                    logError("Sharpshooter 延迟任务异常", e);
+                    logError("SharpshooterElite 延迟任务异常", e);
                 }
             } else {
                 syncDelayedTasks.push(current[i]);
@@ -331,7 +536,7 @@
                 }
             }
         } catch (e) {
-            logError("Sharpshooter 查找最近玩家异常", e);
+            logError("SharpshooterElite 查找最近玩家异常", e);
         }
         return best;
     }
@@ -417,17 +622,23 @@
     // -----------------------------------------------------------------------
     // 生命周期：生成 / 清理
     // -----------------------------------------------------------------------
-    function createWhiteLeatherPiece(material) {
+    // 精英改动：染白与附魔一起写进 meta，一次 setItemMeta 完成
+    function createEnchantedWhiteLeather(material, enchantment, level) {
         var stack = new ItemStack(material);
         try {
             var meta = stack.getItemMeta();
-            if (meta != null && meta instanceof LeatherArmorMeta) {
-                // 需求：皮革甲已染色，颜色为白色
-                meta.setColor(Color.WHITE);
+            if (meta != null) {
+                if (meta instanceof LeatherArmorMeta) {
+                    // 需求：皮革甲已染色，颜色为白色
+                    meta.setColor(Color.WHITE);
+                }
+                if (enchantment != null) {
+                    meta.addEnchant(enchantment, level, true);
+                }
                 stack.setItemMeta(meta);
             }
         } catch (e) {
-            logError("Sharpshooter 皮革甲染色失败", e);
+            logError("SharpshooterElite 皮革甲染色 / 附魔失败", e);
         }
         return stack;
     }
@@ -436,10 +647,15 @@
         try {
             var equipment = carrier.getEquipment();
             if (equipment == null) return;
-            equipment.setHelmet(createWhiteLeatherPiece(Material.LEATHER_HELMET));
-            equipment.setChestplate(createWhiteLeatherPiece(Material.LEATHER_CHESTPLATE));
-            equipment.setLeggings(createWhiteLeatherPiece(Material.LEATHER_LEGGINGS));
-            equipment.setBoots(createWhiteLeatherPiece(Material.LEATHER_BOOTS));
+            // 精英改动：头盔 / 胸甲 弹射物保护 III，裤腿 / 靴子 保护 III
+            equipment.setHelmet(createEnchantedWhiteLeather(Material.LEATHER_HELMET,
+                Enchantment.PROJECTILE_PROTECTION, ARMOR_PROJECTILE_PROTECTION_LEVEL));
+            equipment.setChestplate(createEnchantedWhiteLeather(Material.LEATHER_CHESTPLATE,
+                Enchantment.PROJECTILE_PROTECTION, ARMOR_PROJECTILE_PROTECTION_LEVEL));
+            equipment.setLeggings(createEnchantedWhiteLeather(Material.LEATHER_LEGGINGS,
+                Enchantment.PROTECTION, ARMOR_PROTECTION_LEVEL));
+            equipment.setBoots(createEnchantedWhiteLeather(Material.LEATHER_BOOTS,
+                Enchantment.PROTECTION, ARMOR_PROTECTION_LEVEL));
             equipment.setItemInMainHand(new ItemStack(Material.BOW));
             // 掉落率为 0：BOSS 死亡不掉装备
             equipment.setHelmetDropChance(0.0);
@@ -448,7 +664,7 @@
             equipment.setBootsDropChance(0.0);
             equipment.setItemInMainHandDropChance(0.0);
         } catch (e) {
-            logError("Sharpshooter 穿戴白色皮革甲 / 弓失败", e);
+            logError("SharpshooterElite 穿戴白色皮革甲 / 弓失败", e);
         }
     }
 
@@ -460,7 +676,7 @@
             bar.setProgress(1.0);
             bar.setVisible(true);
         } catch (e) {
-            logError("Sharpshooter 创建 BossBar 失败", e);
+            logError("SharpshooterElite 创建 BossBar 失败", e);
             bar = null;
         }
         return bar;
@@ -478,7 +694,7 @@
             // M-5：必须传 Class.forName(...) 得到的 java.lang.Class。
             var carrier = world.spawn(spawnLoc, StrayClass);
             if (carrier == null) {
-                logError("Sharpshooter 生成失败", "world.spawn 返回 null");
+                logError("SharpshooterElite 生成失败", "world.spawn 返回 null");
                 return false;
             }
 
@@ -496,7 +712,7 @@
             carrier.setCustomNameVisible(false);
             try { carrier.setVisualFire(false); } catch (ignored) { }
             carrier.addScoreboardTag(BOSS_TAG);
-            // 阵营战斗补丁：加入「流寇」阵营
+            // 土匪阵营：faction tag + 加入 [土匪] 队伍
             carrier.addScoreboardTag(FACTION_TAG);
             joinFactionTeam(carrier);
             carrier.getPersistentDataContainer().set(bossKey, PersistentDataType.STRING, BOSS_ID);
@@ -514,7 +730,7 @@
             try {
                 carrier.setHealth(MAX_HEALTH);
             } catch (e) {
-                logError("Sharpshooter 设置生命值失败", e);
+                logError("SharpshooterElite 设置生命值失败", e);
             }
             equipSharpshooter(carrier);
 
@@ -541,7 +757,8 @@
                 nextStrafeFlipTick: globalTick + STRAFE_FLIP_TICKS,
                 faceYaw: 0.0,
                 facePitch: 0.0,
-                dodgeReady: true,               // 需求：每 90 秒一次，触发后才进冷却
+                // 精英改动：闪避改为 3 发，全部用尽后才进冷却
+                dodgeCharges: DODGE_CHARGES,
                 nextDodgeTick: 0,
                 dodgeCount: 0,
                 dead: false,
@@ -554,12 +771,12 @@
             playSoundSafe(world, spawnLoc, Sound.ENTITY_ARROW_SHOOT, 1.2, 0.8);
             spawnParticleSafe(world, Particle.CLOUD, spawnLoc, 25, 0.9, 1.0, 0.9, 0.04);
             spawnParticleSafe(world, Particle.CRIT, spawnLoc, 20, 1.0, 1.0, 1.0, 0.12);
-            log.info("Sharpshooter 生成成功：" + uuid + " @ " + world.getName()
+            log.info("SharpshooterElite 生成成功：" + uuid + " @ " + world.getName()
                 + " (" + Math.round(spawnLoc.getX()) + "," + Math.round(spawnLoc.getY())
                 + "," + Math.round(spawnLoc.getZ()) + ")");
             return true;
         } catch (e) {
-            logError("Sharpshooter 生成失败", e);
+            logError("SharpshooterElite 生成失败", e);
             return false;
         }
     }
@@ -597,7 +814,7 @@
             }
         } catch (ignored) { }
         delete activeBosses[boss.uuid];
-        log.info("Sharpshooter 已清理 BOSS：" + boss.uuid);
+        log.info("SharpshooterElite 已清理 BOSS：" + boss.uuid);
     }
 
     // 本脚本实例当前活着的载具 UUID 集合：
@@ -618,7 +835,7 @@
                 removed++;
             }
         } catch (e) {
-            logError("Sharpshooter 清理带 Tag 实体异常", e);
+            logError("SharpshooterElite 清理带 Tag 实体异常", e);
         }
         return removed;
     }
@@ -643,7 +860,7 @@
                 removed++;
             }
         } catch (e) {
-            logError("Sharpshooter 清理孤儿箭矢异常", e);
+            logError("SharpshooterElite 清理孤儿箭矢异常", e);
         }
         return removed;
     }
@@ -656,7 +873,7 @@
         try {
             Bukkit.removeBossBar(barKey);
         } catch (e) {
-            logError("Sharpshooter 清理孤儿 BossBar 异常", e);
+            logError("SharpshooterElite 清理孤儿 BossBar 异常", e);
         }
     }
 
@@ -671,9 +888,9 @@
                 removed += removeOrphanArrows(world);
             }
             cleanupOrphanBossBars();
-            if (removed > 0) log.info("Sharpshooter 清理孤儿实体 / 箭矢：" + removed + " 个。");
+            if (removed > 0) log.info("SharpshooterElite 清理孤儿实体 / 箭矢：" + removed + " 个。");
         } catch (e) {
-            logError("Sharpshooter 清理孤儿实体异常", e);
+            logError("SharpshooterElite 清理孤儿实体异常", e);
         }
     }
 
@@ -715,18 +932,18 @@
                     handle.setXRot(pitch);
                     if (headRotationViaNms === null) {
                         headRotationViaNms = true;
-                        log.info("Sharpshooter 头部朝向：已启用 NMS 直接写入（setYHeadRot/setYBodyRot）。");
+                        log.info("SharpshooterElite 头部朝向：已启用 NMS 直接写入（setYHeadRot/setYBodyRot）。");
                     }
                 } catch (e) {
                     if (headRotationViaNms === null) {
                         headRotationViaNms = false;
-                        log.warn("Sharpshooter 头部朝向：NMS 通道不可用，退化为 setRotation + lookAt（"
+                        log.warn("SharpshooterElite 头部朝向：NMS 通道不可用，退化为 setRotation + lookAt（"
                             + e + "）。");
                     }
                 }
             }
         } catch (e) {
-            logError("Sharpshooter 朝向计算异常", e);
+            logError("SharpshooterElite 朝向计算异常", e);
         }
         boss.faceYaw = yaw;
         boss.facePitch = pitch;
@@ -806,7 +1023,7 @@
                 stepToward(boss, -sideX, -sideZ, STRAFE_SPEED);
             }
         } catch (e) {
-            logError("Sharpshooter 移动异常", e);
+            logError("SharpshooterElite 移动异常", e);
         }
     }
 
@@ -875,7 +1092,7 @@
                 player.damage(amount);
             }
         } catch (e) {
-            logError("Sharpshooter 造成伤害失败", e);
+            logError("SharpshooterElite 造成伤害失败", e);
             return false;
         }
         try {
@@ -919,24 +1136,28 @@
                 player.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS,
                     POISON_EFFECT_TICKS, POISON_BLINDNESS_AMPLIFIER, false, true, true));
             } catch (ignored) { }
-            try {
-                player.sendMessage(ChatColor.DARK_GREEN + "[" + BOSS_NAME + "] " + ChatColor.GRAY
-                    + "猛毒箭命中：中毒 IV + 失明 " + (POISON_EFFECT_TICKS / 20) + " 秒。");
-                player.sendActionBar(ChatColor.DARK_GREEN + "中毒 IV" + ChatColor.GRAY + " + "
-                    + ChatColor.DARK_GRAY + "失明 " + (POISON_EFFECT_TICKS / 20) + "s");
-            } catch (ignored) { }
+            if (!HIDE_ALL_TEXT) {
+                try {
+                    player.sendMessage(ChatColor.DARK_GREEN + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+                        + "猛毒箭命中：中毒 IV + 失明 " + (POISON_EFFECT_TICKS / 20) + " 秒。");
+                    player.sendActionBar(ChatColor.DARK_GREEN + "中毒 IV" + ChatColor.GRAY + " + "
+                        + ChatColor.DARK_GRAY + "失明 " + (POISON_EFFECT_TICKS / 20) + "s");
+                } catch (ignored) { }
+            }
         } else if (kind === KIND_BINDING) {
             // 需求：对损失生命值的玩家施加 缓慢 V，持续 5 秒
             try {
                 player.addPotionEffect(new PotionEffect(PotionEffectType.SLOWNESS,
                     BINDING_SLOW_TICKS, BINDING_SLOW_AMPLIFIER, false, true, true));
             } catch (ignored) { }
-            try {
-                player.sendMessage(ChatColor.DARK_PURPLE + "[" + BOSS_NAME + "] " + ChatColor.GRAY
-                    + "禁锢箭命中：缓慢 V " + (BINDING_SLOW_TICKS / 20) + " 秒。");
-                player.sendActionBar(ChatColor.DARK_PURPLE + "禁锢！" + ChatColor.GRAY + "缓慢 V "
-                    + (BINDING_SLOW_TICKS / 20) + "s");
-            } catch (ignored) { }
+            if (!HIDE_ALL_TEXT) {
+                try {
+                    player.sendMessage(ChatColor.DARK_PURPLE + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+                        + "禁锢箭命中：缓慢 V " + (BINDING_SLOW_TICKS / 20) + " 秒。");
+                    player.sendActionBar(ChatColor.DARK_PURPLE + "禁锢！" + ChatColor.GRAY + "缓慢 V "
+                        + (BINDING_SLOW_TICKS / 20) + "s");
+                } catch (ignored) { }
+            }
         }
         return "hit";
     }
@@ -964,10 +1185,12 @@
         } catch (ignored) { }
         pushPlayer(player, outX * EXPLOSIVE_LAUNCH_OUT, EXPLOSIVE_LAUNCH_UP,
             outZ * EXPLOSIVE_LAUNCH_OUT);
-        try {
-            player.sendMessage(ChatColor.RED + "[" + BOSS_NAME + "] " + ChatColor.GRAY
-                + "爆裂箭把你炸飞了！");
-        } catch (ignored) { }
+        if (!HIDE_ALL_TEXT) {
+            try {
+                player.sendMessage(ChatColor.RED + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+                    + "爆裂箭把你炸飞了！");
+            } catch (ignored) { }
+        }
         return "hit";
     }
 
@@ -1021,8 +1244,10 @@
             // 原版伤害归零：命中判定与伤害全部由脚本结算，避免双重结算与盾牌物理弹开
             arrow.setDamage(0.0);
             // 实测（本机探针）：Bukkit 1.21.8 的 Arrow / AbstractArrow 并没有
-            // setKnockback(int)，击退一律由脚本自己控制；这里只关掉暴击与穿透。
-            try { arrow.setPierceLevel(0); } catch (ignored) { }
+            // setKnockback(int)，击退一律由脚本自己控制；这里只关掉暴击。
+            // 精英改动：穿透拉满 —— 箭矢穿过一切实体（含其他自定义 BOSS / 小怪），
+            // 既不会被队友挡下，也不会对队友造成任何影响（原版伤害为 0）。
+            try { arrow.setPierceLevel(ARROW_PIERCE_LEVEL); } catch (ignored) { }
             try { arrow.setCritical(false); } catch (ignored) { }
             try { arrow.setPickupStatus(ArrowPickupStatus.DISALLOWED); } catch (ignored) { }
             try { arrow.setFireTicks(0); } catch (ignored) { }
@@ -1039,7 +1264,7 @@
             };
             return arrow;
         } catch (e) {
-            logError("Sharpshooter 生成箭矢失败", e);
+            logError("SharpshooterElite 生成箭矢失败", e);
             return null;
         }
     }
@@ -1093,7 +1318,7 @@
                 if (status === "hit") hits++;
             }
         } catch (e) {
-            logError("Sharpshooter 爆裂箭爆炸结算异常", e);
+            logError("SharpshooterElite 爆裂箭爆炸结算异常", e);
         }
         return hits;
     }
@@ -1230,27 +1455,75 @@
         if (globalTick >= act.endTick) finishAction(boss, act);
     }
 
+    // 精英改动：毒箭蓄力特效 —— 绿色螺旋（绕本体盘旋上升）
+    function drawPoisonSpiral(boss, center) {
+        try {
+            for (var i = 0; i < POISON_SPIRAL_POINTS; i++) {
+                var f = i / POISON_SPIRAL_POINTS;
+                var ang = globalTick * POISON_SPIRAL_SPIN + f * Math.PI * 4.0;   // 两圈
+                spawnParticleSafe(boss.world, Particle.ITEM_SLIME,
+                    new Location(boss.world,
+                        center.getX() + Math.cos(ang) * POISON_SPIRAL_RADIUS,
+                        center.getY() + 0.2 + f * POISON_SPIRAL_HEIGHT,
+                        center.getZ() + Math.sin(ang) * POISON_SPIRAL_RADIUS),
+                    1, 0.0, 0.0, 0.0, 0.0);
+            }
+        } catch (ignored) { }
+    }
+
+    // 精英改动：禁锢箭蓄力特效 —— 紫色方框（四条边各采样若干点）
+    function drawBindingSquare(boss, center, yOffset) {
+        try {
+            var h = BINDING_BOX_HALF;
+            var pts = BINDING_BOX_POINTS_PER_EDGE;
+            var corners = [
+                [center.getX() - h, center.getZ() - h],
+                [center.getX() + h, center.getZ() - h],
+                [center.getX() + h, center.getZ() + h],
+                [center.getX() - h, center.getZ() + h]
+            ];
+            for (var e = 0; e < 4; e++) {
+                var a = corners[e];
+                var b = corners[(e + 1) % 4];
+                for (var i = 0; i < pts; i++) {
+                    var t = i / pts;
+                    spawnParticleSafe(boss.world, Particle.WITCH,
+                        new Location(boss.world,
+                            a[0] + (b[0] - a[0]) * t,
+                            center.getY() + yOffset,
+                            a[1] + (b[1] - a[1]) * t),
+                        1, 0.0, 0.0, 0.0, 0.0);
+                }
+            }
+        } catch (ignored) { }
+    }
+
     function spawnAimEffect(boss, act, target) {
         var loc = boss.carrier.getLocation();
         var eye = boss.carrier.getEyeLocation();
         if (act.kind === KIND_POISON) {
             if (globalTick % 2 !== 0) return;
-            // 绿色毒气蓄力
-            spawnParticleSafe(boss.world, Particle.ITEM_SLIME,
-                new Location(boss.world, eye.getX(), eye.getY(), eye.getZ()),
-                5, 0.35, 0.35, 0.35, 0.0);
+            // 精英改动：绿色螺旋蓄力
+            drawPoisonSpiral(boss, loc);
         } else if (act.kind === KIND_BINDING) {
-            // 需求：紫色粒子 + 警示线警告被瞄准的玩家
+            // 精英改动：紫色方框（上下两框）+ 紫色粒子 + 警示线 + 音效
+            if (globalTick % 2 === 0) {
+                drawBindingSquare(boss, loc, BINDING_BOX_LOW_Y);
+                drawBindingSquare(boss, loc, BINDING_BOX_HIGH_Y);
+            }
             spawnParticleSafe(boss.world, Particle.WITCH,
                 new Location(boss.world, eye.getX(), eye.getY(), eye.getZ()),
                 4, 0.3, 0.3, 0.3, 0.0);
             drawWarningLine(boss, eye, target);
             var left = act.windupEndTick - globalTick;
-            if (left % 20 === 0) {
+            if (left % 10 === 0) {
                 try {
+                    // 精英改动：保留音效提示，去掉文字提示
                     playSoundSafe(boss.world, target.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1.0, 1.6);
-                    target.sendActionBar(ChatColor.DARK_PURPLE + "禁锢箭瞄准中 "
-                        + ChatColor.GRAY + (left / 20) + "s" + ChatColor.YELLOW + "（举盾可挡）");
+                    if (!HIDE_ALL_TEXT) {
+                        target.sendActionBar(ChatColor.DARK_PURPLE + "禁锢箭瞄准中 "
+                            + ChatColor.GRAY + (left / 20) + "s" + ChatColor.YELLOW + "（举盾可挡）");
+                    }
                 } catch (ignored) { }
             }
         } else {
@@ -1348,15 +1621,17 @@
             }
             return null;
         } catch (e) {
-            logError("Sharpshooter 闪避落点解算异常", e);
+            logError("SharpshooterElite 闪避落点解算异常", e);
             return null;
         }
     }
 
     function triggerDodge(boss, player) {
-        // 需求：触发时才进入冷却
-        boss.dodgeReady = false;
-        boss.nextDodgeTick = globalTick + DODGE_COOLDOWN_TICKS;
+        // 精英改动：每次触发消耗 1 发闪避；3 发全部用尽后才开始 90 秒冷却
+        boss.dodgeCharges = Math.max(0, boss.dodgeCharges - 1);
+        if (boss.dodgeCharges <= 0) {
+            boss.nextDodgeTick = globalTick + DODGE_COOLDOWN_TICKS;
+        }
         boss.dodgeCount++;
 
         // 参考玩家：优先取攻击者，其次取最近的玩家，最后退回当前目标
@@ -1372,7 +1647,7 @@
                 boss.carrier.teleport(dest);
             }
         } catch (e) {
-            logError("Sharpshooter 闪避瞬移失败", e);
+            logError("SharpshooterElite 闪避瞬移失败", e);
         }
 
         // 需求：表现效果为留下一团白色烟雾（起点 + 落点都给）
@@ -1384,16 +1659,20 @@
             spawnParticleSafe(boss.world, Particle.SMOKE, dest, 20, 0.5, 0.8, 0.5, 0.02);
             playSoundSafe(boss.world, dest, Sound.ENTITY_ENDERMAN_TELEPORT, 1.2, 0.9);
         }
-        log.info("Sharpshooter 触发闪避：第 " + boss.dodgeCount + " 次，"
+        log.info("SharpshooterElite 触发闪避：第 " + boss.dodgeCount + " 次，"
             + (dest == null ? "未找到有效落点（原地抵挡）" : "落点 " + Math.round(dest.getX())
                 + "," + Math.round(dest.getY()) + "," + Math.round(dest.getZ())));
         return dest != null;
     }
 
     function updateDodgeRecharge(boss) {
-        if (boss.dodgeReady) return;
+        // 精英改动：只有「已经打空并进入冷却」才回满 —— nextDodgeTick 为 0 表示还有存货，
+        // 绝不能因为 globalTick >= 0 就把次数立刻补回去（否则闪避会变成无限次）。
+        if (boss.nextDodgeTick <= 0) return;
         if (globalTick < boss.nextDodgeTick) return;
-        boss.dodgeReady = true;
+        if (boss.dodgeCharges >= DODGE_CHARGES) { boss.nextDodgeTick = 0; return; }
+        boss.dodgeCharges = DODGE_CHARGES;   // 冷却结束一次性回满 3 发
+        boss.nextDodgeTick = 0;
         try {
             spawnParticleSafe(boss.world, Particle.END_ROD,
                 new Location(boss.world, boss.carrier.getLocation().getX(),
@@ -1428,7 +1707,7 @@
             }
             return false;
         } catch (e) {
-            logError("Sharpshooter 箭矢兜底命中异常", e);
+            logError("SharpshooterElite 箭矢兜底命中异常", e);
             return false;
         }
     }
@@ -1468,173 +1747,13 @@
     // -----------------------------------------------------------------------
     // 战斗总控
     // -----------------------------------------------------------------------
-    // =======================================================================
-    // 阵营战斗补丁（与精英三人组同构；本体三人组同属「流寇」阵营）
-    // =======================================================================
-    var FACTION_TAG = "liukou_faction";
-    var FACTION_TEAM = "liukou";
-    var FACTION_PREFIX = ChatColor.DARK_GRAY + "[流寇] " + ChatColor.RESET;
-    var PATCH_ENTITY_CLASS = Class.forName("org.bukkit.entity.Entity");
-    // 注意：instanceof 的右操作数必须用 Java.type（Class.forName 的结果不能用于 instanceof）
-    var PATCH_ENEMY_CLASS = Java.type("org.bukkit.entity.Enemy");
-
-    var FALLBACK_ATTACK_NON_FACTION = false;
-    var HOSTILE_TAGS_EXACT = ["custom_hostile"];
-    var HOSTILE_TAG_SUFFIXES = ["_boss"];
-    var RETALIATE_MEMORY_TICKS = 200;
-    var RETALIATE_COOLDOWN_TICKS = 30;
-    var RETALIATE_DAMAGE = 4.0;
-
-    function joinFactionTeam(entity) {
-        try {
-            var sb = Bukkit.getScoreboardManager().getMainScoreboard();
-            var team = sb.getTeam(FACTION_TEAM);
-            if (team == null) {
-                team = sb.registerNewTeam(FACTION_TEAM);
-                team.setDisplayName("[流寇]");
-            }
-            team.setPrefix(FACTION_PREFIX);
-            var entry = String(entity.getUniqueId().toString());
-            if (!team.hasEntry(entry)) team.addEntry(entry);
-        } catch (e) {
-            logError("Sharpshooter 加入流寇阵营失败", e);
-        }
-    }
-
-    function isFactionAlly(entity) {
-        try {
-            if (entity == null) return false;
-            return entity.getScoreboardTags().contains(FACTION_TAG);
-        } catch (e) {
-            return false;
-        }
-    }
-
-    function markRetaliate(boss, attacker) {
-        try {
-            if (attacker == null || !attacker.isValid()) return;
-            if (String(attacker.getUniqueId().toString()) === boss.uuid) return;
-            if (boss.nextRetaliateHitTick == null) boss.nextRetaliateHitTick = 0;
-            boss.retaliateTarget = attacker;
-            boss.retaliateUntilTick = globalTick + RETALIATE_MEMORY_TICKS;
-        } catch (ignored) { }
-    }
-
-    function resolveRetaliateTarget(boss) {
-        var t = boss.retaliateTarget;
-        if (t == null) return null;
-        try {
-            if (!t.isValid() || t.isDead()) { boss.retaliateTarget = null; return null; }
-        } catch (e) {
-            boss.retaliateTarget = null;
-            return null;
-        }
-        if (globalTick > boss.retaliateUntilTick) { boss.retaliateTarget = null; return null; }
-        return t;
-    }
-
-    function isAggressiveAgainstNonFaction() {
-        try {
-            var api = getShared("FactionSettings");
-            if (api == null) api = getShared("BanditFaction");
-            if (api != null && typeof api.isAggressive === "function") {
-                return api.isAggressive() === true;
-            }
-        } catch (e) { }
-        return FALLBACK_ATTACK_NON_FACTION;
-    }
-
-    function isHostileEntity(entity) {
-        try {
-            if (entity == null || !entity.isValid() || entity.isDead()) return false;
-            if (entity instanceof PlayerClass) return false;
-            if (isFactionAlly(entity)) return false;
-            if (entity instanceof PATCH_ENEMY_CLASS) return true;
-            var tags = entity.getScoreboardTags();
-            var it = tags.iterator();
-            while (it.hasNext()) {
-                var tag = String(it.next());
-                for (var i = 0; i < HOSTILE_TAGS_EXACT.length; i++) {
-                    if (tag === HOSTILE_TAGS_EXACT[i]) return true;
-                }
-                for (var j = 0; j < HOSTILE_TAG_SUFFIXES.length; j++) {
-                    var suf = HOSTILE_TAG_SUFFIXES[j];
-                    if (tag.length > suf.length
-                            && tag.substring(tag.length - suf.length) === suf) return true;
-                }
-            }
-        } catch (e) { }
-        return false;
-    }
-
-    function findNearestHostileEntity(boss) {
-        var best = null;
-        var bestDist = TARGET_RANGE * TARGET_RANGE;
-        try {
-            var it = boss.world.getEntitiesByClass(PATCH_ENTITY_CLASS).iterator();
-            while (it.hasNext()) {
-                var e = it.next();
-                if (!isHostileEntity(e)) continue;
-                var d = e.getLocation().distanceSquared(boss.carrier.getLocation());
-                if (d < bestDist) { bestDist = d; best = e; }
-            }
-        } catch (e2) { }
-        return best;
-    }
-
-    function pickHostileIfNearer(boss, playerTarget) {
-        try {
-            var hostile = findNearestHostileEntity(boss);
-            if (hostile == null) return null;
-            if (playerTarget == null) return hostile;
-            var loc = boss.carrier.getLocation();
-            var dh = hostile.getLocation().distanceSquared(loc);
-            var dp = playerTarget.getLocation().distanceSquared(loc);
-            return (dh < dp) ? hostile : null;
-        } catch (e) {
-            return null;
-        }
-    }
-
-    // 反击：保持射击距离，按冷却放一箭
-    function updateRetaliate(boss, foe) {
-        try {
-            var loc = boss.carrier.getLocation();
-            var tl = foe.getLocation();
-            var dx = tl.getX() - loc.getX();
-            var dz = tl.getZ() - loc.getZ();
-            var dist = Math.sqrt(dx * dx + dz * dz);
-            if (dist < KEEP_DISTANCE || dist > PREFERRED_RANGE) {
-                updateMovement(boss, foe);
-            } else {
-                try { faceTarget(boss, tl); } catch (ignored) { }
-            }
-            if (globalTick < boss.nextRetaliateHitTick) return;
-            if (dist > ATTACK_MAX_RANGE) return;
-            boss.nextRetaliateHitTick = globalTick + RETALIATE_COOLDOWN_TICKS;
-            try { foe.damage(RETALIATE_DAMAGE, boss.carrier); } catch (ignored) { }
-            playSoundSafe(boss.world, loc, Sound.ENTITY_ARROW_SHOOT, 1.0, 1.1);
-            var eye = boss.carrier.getEyeLocation();
-            for (var i = 1; i <= 6; i++) {
-                var t = i / 6.0;
-                spawnParticleSafe(boss.world, Particle.CRIT, new Location(boss.world,
-                    eye.getX() + (tl.getX() - eye.getX()) * t,
-                    eye.getY() + 1.0 + (tl.getY() - eye.getY()) * t,
-                    eye.getZ() + (tl.getZ() - eye.getZ()) * t),
-                    1, 0.0, 0.0, 0.0, 0.0);
-            }
-        } catch (e) {
-            logError("Sharpshooter 反击异常", e);
-        }
-    }
-    // ===================== 阵营战斗补丁结束 =====================
-
     function updateCombat(boss) {
         var target = findNearestPlayer(boss);
         boss.target = target;
 
-        // 阵营战斗补丁：反击优先 + 主动攻击模式（谁近打谁）
+        // 精英改动 1：反击优先 —— 被非同阵营的生物实体打过就先还击
         var foe = resolveRetaliateTarget(boss);
+        // 精英改动 2：主动攻击模式（/bandit attack on）—— 敌对实体比玩家更近就先打它
         if (foe == null && isAggressiveAgainstNonFaction()) {
             foe = pickHostileIfNearer(boss, target);
         }
@@ -1678,8 +1797,10 @@
                 var health = boss.carrier.getHealth();
                 boss.bar.setTitle(BOSS_NAME + "  " + ChatColor.YELLOW + Math.max(0, Math.round(health))
                     + ChatColor.GRAY + "/" + ChatColor.YELLOW + Math.round(MAX_HEALTH)
-                    + (boss.dodgeReady ? ChatColor.AQUA + "  [闪避就绪]" : ChatColor.DARK_GRAY + "  [闪避 "
-                        + Math.max(0, Math.ceil((boss.nextDodgeTick - globalTick) / 20.0)) + "s]"));
+                    + (boss.dodgeCharges > 0
+                        ? ChatColor.AQUA + "  [闪避 x" + boss.dodgeCharges + "]"
+                        : ChatColor.DARK_GRAY + "  [闪避 "
+                            + Math.max(0, Math.ceil((boss.nextDodgeTick - globalTick) / 20.0)) + "s]"));
                 boss.bar.setProgress(clamp(health / MAX_HEALTH, 0.0, 1.0));
             } catch (ignored) { }
         }
@@ -1719,7 +1840,7 @@
             spawnParticleSafe(boss.world, Particle.CLOUD, boss.deathLocation, 30, 0.8, 1.0, 0.8, 0.04);
             spawnParticleSafe(boss.world, Particle.CRIT, boss.deathLocation, 25, 0.8, 1.0, 0.8, 0.1);
         }
-        log.info("Sharpshooter 进入死亡序列：" + boss.uuid);
+        log.info("SharpshooterElite 进入死亡序列：" + boss.uuid);
     }
 
     function updateDeathSequence(boss) {
@@ -1727,7 +1848,7 @@
             spawnParticleSafe(boss.world, Particle.SMOKE, boss.deathLocation, 8, 0.6, 0.8, 0.6, 0.02);
         }
         if (globalTick >= boss.deathEndTick) {
-            log.info("Sharpshooter 死亡序列完成。");
+            log.info("SharpshooterElite 死亡序列完成。");
             cleanupBoss(boss);
         }
     }
@@ -1760,7 +1881,7 @@
             try {
                 updateBoss(boss);
             } catch (e) {
-                logError("Sharpshooter BOSS[" + uuids[i] + "] tick 异常", e);
+                logError("SharpshooterElite BOSS[" + uuids[i] + "] tick 异常", e);
             }
         }
     }
@@ -1795,23 +1916,24 @@
                     if (attacker == null) attacker = source.getDirectEntity();
                 }
                 if (attacker != null && !(attacker instanceof PlayerClass)) {
-                    // 阵营战斗补丁：可被非同阵营生物实体伤害并反击；同阵营（流寇）友伤关闭
+                    // 精英改动：可以被其它生物实体（小怪 / 非同阵营的自定义 BOSS）伤害，
+                    // 并进入反击状态；同阵营（土匪）之间关闭友伤。
                     if (isFactionAlly(attacker)) {
                         event.setCancelled(true);
                         return;
                     }
                     markRetaliate(boss, attacker);
-                    // 注意：不 return —— 伤害照常生效，随后仍可能被闪避抵挡
+                    // 注意：不 return —— 非同阵营的伤害照常生效，但仍可能被闪避抵挡
                 }
 
-                // 需求：每 90 秒拥有一次抵挡任意伤害来源的能力，并瞬移远离玩家
-                if (boss.dodgeReady) {
+                // 精英改动：只要还有闪避次数，就抵挡任意伤害来源并瞬移远离玩家
+                if (boss.dodgeCharges > 0) {
                     event.setCancelled(true);
                     var player = (attacker instanceof PlayerClass) ? attacker : boss.target;
                     triggerDodge(boss, player);
                 }
             } catch (e) {
-                logError("Sharpshooter 受伤事件异常", e);
+                logError("SharpshooterElite 受伤事件异常", e);
             }
         });
 
@@ -1833,7 +1955,7 @@
                         6, 0.4, 0.4, 0.4, 0.05);
                 }
             } catch (e) {
-                logError("Sharpshooter 近战/远程事件异常", e);
+                logError("SharpshooterElite 近战/远程事件异常", e);
             }
         });
 
@@ -1845,6 +1967,14 @@
                 var uuid = String(proj.getUniqueId().toString());
                 var entry = trackedArrows[uuid];
                 if (entry == null) return;
+
+                // 精英改动：箭矢穿透一切实体 —— 命中「非玩家实体」（其他自定义 BOSS / 小怪）时
+                // 直接放行：不取消、不删除、不结算，让箭继续飞。
+                // 否则即使 setPierceLevel 让箭穿过去了，这里也会把箭没收并结算，
+                // 依然会出现「被队友挡下」和「爆裂箭在队友身上炸开」的误伤。
+                var hitEntity = null;
+                try { hitEntity = event.getHitEntity(); } catch (ignored) { }
+                if (hitEntity != null && !(hitEntity instanceof PlayerClass)) return;
 
                 event.setCancelled(true);
                 delete trackedArrows[uuid];
@@ -1863,7 +1993,7 @@
                     resolveArrowImpact(boss, entry.kind, hitPlayer, loc);
                 }
             } catch (e) {
-                logError("Sharpshooter 箭矢命中事件异常", e);
+                logError("SharpshooterElite 箭矢命中事件异常", e);
             }
         });
 
@@ -1878,7 +2008,7 @@
                 } catch (ignored) { }
                 startDeathSequence(boss);
             } catch (e) {
-                logError("Sharpshooter 死亡事件异常", e);
+                logError("SharpshooterElite 死亡事件异常", e);
             }
         });
 
@@ -1892,17 +2022,17 @@
         try {
             processSyncDelayedTasks();
         } catch (e) {
-            logError("Sharpshooter 延迟队列异常", e);
+            logError("SharpshooterElite 延迟队列异常", e);
         }
         try {
             updateAllBosses();
         } catch (e) {
-            logError("Sharpshooter 主循环异常", e);
+            logError("SharpshooterElite 主循环异常", e);
         }
         try {
             updateTrackedArrows();
         } catch (e) {
-            logError("Sharpshooter 箭矢推进异常", e);
+            logError("SharpshooterElite 箭矢推进异常", e);
         }
     });
 
@@ -1932,7 +2062,7 @@
                 registeredThisInstance = true;
             }
         } catch (e) {
-            logError("Sharpshooter 注册异常", e);
+            logError("SharpshooterElite 注册异常", e);
         }
     }
 
@@ -1942,5 +2072,5 @@
     // -----------------------------------------------------------------------
     // 启动日志（契约第 10 节：必须能看到脚本自己的加载日志）
     // -----------------------------------------------------------------------
-    log.info("Sharpshooter 已加载：使用 /call boss " + BOSS_NAME + " 获取召唤绿宝石。");
+    log.info("SharpshooterElite 已加载：使用 /call boss " + BOSS_NAME + " 获取召唤绿宝石。");
 })();

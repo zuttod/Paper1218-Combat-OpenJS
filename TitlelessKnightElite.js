@@ -1,16 +1,30 @@
 /*
- * TitlelessKnight.js —— 自定义 BOSS「无爵骑士」（OpenJS 1.5.0 / Paper 1.21.8）
+ * TitlelessKnightElite.js —— 自定义 BOSS「无爵骑士_精英」（OpenJS 1.5.0 / Paper 1.21.8）
  *
- * 获取方式：/call boss 无爵骑士
- * 召唤方式：手持名为「无爵骑士」的绿宝石右键地面 → 6 秒倒计时 → spawn
+ * 来源：本脚本由 TitlelessKnight.js（无爵骑士）派生。两个 BOSS 完全独立、互不干扰：
+ *   · 独立 BOSS_ID / 显示名 / 别名（titleless_knight_elite）
+ *   · 独立 PDC 键（titleless_knight_elite_boss_type / titleless_knight_elite_bar）
+ *   · 独立 scoreboard tag（titleless_knight_elite_boss）
+ *   · 独立运行时状态表（各自脚本引擎内的 activeBosses，互不可见）
+ *   两个脚本各自的 getBossByEntity 都先校验自己的 tag，因此不会认领对方的实体。
+ *
+ * 获取方式：/call boss 无爵骑士_精英
+ * 召唤方式：手持名为「无爵骑士_精英」的绿宝石右键地面 → 6 秒倒计时 → spawn
+ *
+ * 相对「无爵骑士」的全部改动：
+ *   1. 生命值 200 → 450；头/胸/腿/脚 四件铁甲额外附魔 保护 III
+ *   2. 大剑攻击冷却 40 tick（2 秒）→ 30 tick（1.5 秒）
+ *   3. 冲锋一次连冲 2 段（原 1 段）；单段伤害 10 → 12
+ *   4. 新增技能「战令」：16 格光环，光环内的自定义 BOSS 获得 抗性提升 III + 速度 II
+ *      （每秒刷新，每次持续 5 秒）；光环持续 45 秒，冷却 60 秒
  *
  * 机制摘要：
- *   外观：真实尸壳（Husk）本体，头 / 胸 / 腿 / 脚 全套铁甲，主手 下界合金剑（锋利 V）
- *   数据：HP 200；移动速度 0.24 格/tick（玩家步行约 0.215，略快约 11%）；
+ *   外观：真实尸壳（Husk）本体，头 / 胸 / 腿 / 脚 全套铁甲（保护 III），主手 下界合金剑（锋利 V）
+ *   数据：HP 450；移动速度 0.24 格/tick（玩家步行约 0.215，略快约 11%）；
  *         击退抗性 1.0（完全免疫击退）；免疫火焰 / 爆炸 / 摔落 / 中毒等环境伤害，
  *         只接受玩家造成的伤害
  *   朝向：追击 / 行走时本体与头部都持续看向目标玩家（含俯仰）
- *   大剑（主武器，攻击冷却 2 秒，每次从三种攻击里随机挑一种）：
+ *   大剑（主武器，攻击冷却 1.5 秒，每次从三种攻击里随机挑一种）：
  *     · 挥砍  ：前摇 0.3 秒后连续 2 段判定，单段 6 点，两段间隔 12 tick；
  *               举盾可完全挡下（不掉血、不击退）
  *     · 劈砍  ：1 秒前摇（可躲避），单段 14 点高伤害；按「斧头破盾」原理——
@@ -19,8 +33,10 @@
  *               被盾牌挡下或未命中则不产生任何效果
  *   恐惧战吼：32 格内玩家 虚弱 II 30 秒；冷却 60 秒（0.5 秒蓄力 + 冲击环）；
  *             被吼中的玩家用盾牌成功格挡 3 次攻击即可提前驱散虚弱
- *   冲锋    ：向玩家方向冲刺最多 14 格，途经玩家 10 点伤害 + 击退；
+ *   冲锋    ：向玩家方向连冲 2 段（每段最多 14 格），途经玩家 12 点伤害 + 击退；
  *               可被盾牌防下；冷却 10 秒（需求未指定冷却，本脚本自行设定）
+ *   战令    ：16 格光环，光环内的自定义 BOSS 获得 抗性提升 III + 速度 II（每次 5 秒）；
+ *               光环持续 45 秒，冷却 60 秒（从施放起算）
  *
  * 契约依据：《OpenJS脚本数据契约.md》v1.0.0
  *   - 第 2 节  IIFE + "use strict" 作用域隔离
@@ -63,34 +79,42 @@
 
     // M-5：Java.type(...) 返回 Nashorn StaticClass，不能当 java.lang.Class 传给 world.spawn。
     var EntityClass = Class.forName("org.bukkit.entity.Entity");
+    // 注意：instanceof 的右操作数必须是 Java.type 的结果！
+    // Class.forName(...) 得到的是 java.lang.Class，用 instanceof 会抛
+    // "TypeError: instanceof must be called with a javascript or java object"，
+    // 而且会被 try/catch 吞掉变成静默失效（踩过一次）。
+    var EnemyClass = Java.type("org.bukkit.entity.Enemy");
     var HuskClass = Class.forName("org.bukkit.entity.Husk");
 
     // -----------------------------------------------------------------------
     // 数值配置
     // -----------------------------------------------------------------------
-    var BOSS_ID = "titleless_knight";
-    var BOSS_NAME = "无爵骑士";
-    // 注意：加 "无爵骑士" 是为了让 /call boss 无爵骑士 在「无爵骑士_精英」存在时
-    // 仍然精确命中本体（CallBoss 的别名精确匹配优先于前缀匹配，否则两者会前缀冲突）。
-    var BOSS_ALIASES = ["无爵骑士", "无爵", "knight", "titleless", "titlelessknight"];
+    var BOSS_ID = "titleless_knight_elite";
+    var BOSS_NAME = "无爵骑士_精英";
+    // 别名刻意不与「无爵骑士」的别名（无爵 / knight / titleless / titlelessknight）重合，
+    // 否则 /call boss 的精确别名匹配会先命中旧 BOSS，导致精英版永远查不到。
+    var BOSS_ALIASES = ["精英骑士", "elite", "knight_elite", "titlelessknightelite"];
     var BOSS_LORE = [
-        "生命值：200",
-        "全身铁甲，手持下界合金剑（锋利 V）（尸壳本体）",
+        "生命值：450",
+        "全身铁甲（保护 III），手持下界合金剑（锋利 V）（尸壳本体）",
         "免疫击退；免疫火焰、爆炸、摔落等环境伤害",
         "只接受玩家造成的伤害",
         "————————————————",
-        "大剑（攻击冷却 2 秒，三选一）：",
+        "大剑（攻击冷却 1.5 秒，三选一）：",
         "· 挥砍：2 段均衡伤害，可被盾牌挡下",
         "· 劈砍：1 秒前摇的高伤害，举盾可挡下但盾会被击碎（5 秒无法格挡）",
         "· 眩晕击：命中后附加 缓慢 III 5 秒；被盾牌挡下则无任何效果",
         "————————————————",
         "恐惧战吼：32 格内 虚弱 II 30 秒，冷却 60 秒",
         "· 被吼中后用盾牌成功格挡 3 次攻击，可提前驱散虚弱",
-        "冲锋：向玩家方向冲撞，途经玩家受伤，可被盾牌挡下，冷却 10 秒"
+        "冲锋：向玩家方向连冲 2 段，途经玩家受伤，可被盾牌挡下，冷却 10 秒",
+        "————————————————",
+        "战令：16 格光环，光环内的自定义 BOSS 获得 抗性提升 III + 速度 II（每次 5 秒）",
+        "· 光环持续 45 秒，冷却 60 秒"
     ];
 
     // 生命 / 移动
-    var MAX_HEALTH = 200.0;
+    var MAX_HEALTH = 450.0;               // 精英改动：200 → 450
     var KNOCKBACK_RESISTANCE = 1.0;       // 需求：免疫击退（属性满值 = 完全免疫）
     // 速度：玩家步行速度属性 0.1 ≈ 0.215 格/tick。
     // 本 BOSS 由脚本逐 tick 位移移动（无 AI 实体不吃移动速度属性），
@@ -111,7 +135,7 @@
     var STUN_WEIGHT = 2;
 
     // 大剑：公共参数
-    var MELEE_COOLDOWN_TICKS = 40;        // 需求：攻击冷却 2 秒
+    var MELEE_COOLDOWN_TICKS = 30;        // 精英改动：攻击冷却 2 秒 → 1.5 秒
     var MELEE_TRIGGER_RANGE = 3.4;        // 进入该距离才会发动大剑攻击
     var MELEE_ARC_DOT_MIN = -0.34;        // 正面约 ±110° 扇形，绕后可躲
 
@@ -152,16 +176,18 @@
     var ROAR_WEAKNESS_BLOCKS_TO_CLEAR = 3;
 
     // 冲锋：向玩家方向位移一段距离，途经玩家受伤，可被盾牌防御
+    // 精英改动：一次施放连冲 2 段，段与段之间重新预警并重新锁定玩家方向
+    var ELITE_CHARGE_COUNT = 2;           // 精英改动：冲撞次数 1 → 2
     var CHARGE_COOLDOWN_TICKS = 200;      // 需求未指定，自行设定 10 秒
     var CHARGE_MIN_DISTANCE = 4.0;
     var CHARGE_MAX_DISTANCE = 26.0;
     var CHARGE_WINDUP_TICKS = 15;         // 0.75 秒预警
     var CHARGE_STEP = 0.85;               // 每 tick 位移（约 17 格/秒）
-    var CHARGE_MAX_TRAVEL = 14.0;         // 单次冲锋最大位移
-    var CHARGE_MAX_TICKS = 30;            // 单次冲锋最长 tick 数（兜底，正常由位移上限结束）
+    var CHARGE_MAX_TRAVEL = 14.0;         // 单段冲锋最大位移
+    var CHARGE_MAX_TICKS = 30;            // 单段冲锋最长 tick 数（兜底，正常由位移上限结束）
     var CHARGE_HIT_RADIUS = 1.8;
     var CHARGE_VERTICAL_TOLERANCE = 2.0;
-    var CHARGE_DAMAGE = 10.0;
+    var CHARGE_DAMAGE = 12.0;             // 精英改动：10 → 12（略微提升）
     var CHARGE_KNOCKBACK = 0.6;
     var CHARGE_BLOCK_KNOCKBACK = 0.15;
     var CHARGE_RECOVER_TICKS = 10;        // 冲锋结束后的收招时间
@@ -171,19 +197,210 @@
     var MAX_FACE_PITCH = 35.0;            // 抬头 / 低头最大角度，避免怪异姿势
     // 主手武器的附魔（需求：下界合金剑 锋利 V）
     var SWORD_SHARPNESS_LEVEL = 5;
+    // 精英改动：全套铁甲附魔 保护 III
+    var ARMOR_PROTECTION_LEVEL = 3;
+    // 精英改动：命中类「聊天栏」提示默认关闭（双段冲锋连击时特别刷屏）。
+    // 想恢复把对应开关改回 true 即可；动作栏（血条上方）提示不受影响。
+    var SHOW_CHARGE_HIT_MESSAGE = false;  // 「你被冲锋撞飞了！」
+    var SHOW_STUN_HIT_MESSAGE = false;    // 「你被眩晕击命中：缓慢 III 5 秒」
 
     // 初始技能时间（刚召唤出来给玩家一点准备时间）
     var INITIAL_MELEE_DELAY_TICKS = 20;
     var INITIAL_ROAR_DELAY_TICKS = 100;
     var INITIAL_CHARGE_DELAY_TICKS = 80;
 
+    // ---- 精英新增技能：战令 ----
+    // 冷却从「施放时刻」起算：光环亮 45 秒，之后 15 秒空档，60 秒后可再次施放。
+    var ORDER_COOLDOWN_TICKS = 1200;      // 冷却 60 秒
+    var ORDER_DURATION_TICKS = 900;       // 光环持续 45 秒
+    var ORDER_RADIUS = 16.0;              // 光环半径 16 格
+    var ORDER_BUFF_TICKS = 100;           // 每次给目标的效果持续 5 秒
+    var ORDER_BUFF_REFRESH_TICKS = 20;    // 每秒刷新一次；离开光环后效果最多再留 5 秒
+    var ORDER_RESISTANCE_AMPLIFIER = 2;   // amplifier 2 = 抗性提升 III
+    var ORDER_SPEED_AMPLIFIER = 1;        // amplifier 1 = 速度 II
+    var ORDER_INITIAL_DELAY_TICKS = 120;  // 召唤后 6 秒才可能首次施放
+    var ORDER_BUFF_SELF = true;           // true = 光环也作用于骑士自己（它就在光环中心）
+    var ORDER_RING_POINTS = 32;           // 光环可视化：圆周采样点数
+
     // 死亡
     var DEATH_SEQUENCE_TICKS = 30;
 
-    // Tag / PDC key 必须带 BOSS id 前缀，避免跨 BOSS 冲突
-    var BOSS_TAG = "titleless_knight_boss";
-    var bossKey = new NamespacedKey(plugin, "titleless_knight_boss_type");
-    var barKey = new NamespacedKey(plugin, "titleless_knight_bar");
+    // Tag / PDC key 必须带 BOSS id 前缀，避免跨 BOSS 冲突。
+    // 精英版把三处名字全部改成自己的，这是两个 BOSS 互不认领对方实体的关键。
+    var BOSS_TAG = "titleless_knight_elite_boss";
+    var bossKey = new NamespacedKey(plugin, "titleless_knight_elite_boss_type");
+    var barKey = new NamespacedKey(plugin, "titleless_knight_elite_bar");
+
+    // ---- 「土匪」阵营（与 神射手_精英 / 流浪术士_精英 同一阵营）----
+    var FACTION_TAG = "bandit_faction";
+    var FACTION_TEAM = "bandit";
+    var FACTION_PREFIX = ChatColor.DARK_RED + "[土匪] " + ChatColor.RESET;
+
+    function joinFactionTeam(entity) {
+        try {
+            var sb = Bukkit.getScoreboardManager().getMainScoreboard();
+            var team = sb.getTeam(FACTION_TEAM);
+            if (team == null) {
+                team = sb.registerNewTeam(FACTION_TEAM);
+                team.setDisplayName("[土匪]");
+            }
+            team.setPrefix(FACTION_PREFIX);
+            var entry = String(entity.getUniqueId().toString());
+            if (!team.hasEntry(entry)) team.addEntry(entry);
+        } catch (e) {
+            logError("TitlelessKnightElite 加入土匪阵营失败", e);
+        }
+    }
+
+    // ---- 精英改动：阵营友伤 / 反击 ----
+    // 同阵营（带 bandit_faction）之间关闭友伤；被非同阵营的生物实体（小怪 / 其它自定义 BOSS）
+    // 打中时不取消伤害，并记住攻击者在 RETALIATE_MEMORY_TICKS 内持续反击。
+    var RETALIATE_MEMORY_TICKS = 200;      // 挨打后 10 秒内保持反击目标
+    var RETALIATE_COOLDOWN_TICKS = 20;     // 每 1 秒还手一次
+    var RETALIATE_DAMAGE = 8.0;            // 反击伤害（约等于大剑普通一击）
+
+    function isFactionAlly(entity) {
+        try {
+            if (entity == null) return false;
+            return entity.getScoreboardTags().contains(FACTION_TAG);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function markRetaliate(boss, attacker) {
+        try {
+            if (attacker == null || !attacker.isValid()) return;
+            if (String(attacker.getUniqueId().toString()) === boss.uuid) return;
+            if (boss.nextRetaliateHitTick == null) boss.nextRetaliateHitTick = 0;
+            boss.retaliateTarget = attacker;
+            boss.retaliateUntilTick = globalTick + RETALIATE_MEMORY_TICKS;
+        } catch (ignored) { }
+    }
+
+    function resolveRetaliateTarget(boss) {
+        var t = boss.retaliateTarget;
+        if (t == null) return null;
+        try {
+            if (!t.isValid() || t.isDead()) { boss.retaliateTarget = null; return null; }
+        } catch (e) {
+            boss.retaliateTarget = null;
+            return null;
+        }
+        if (globalTick > boss.retaliateUntilTick) { boss.retaliateTarget = null; return null; }
+        return t;
+    }
+
+    // ---- 精英改动：是否主动攻击「非同阵营」（为 BOSS 之间的战斗做准备）----
+    // 默认 false = 只反击、不主动出击；可用 /bandit attack on|off 运行时切换
+    //（真正的开关由 BanditTrioElite.js 通过 getShared("BanditFaction") 持有并持久化，
+    //  这里只是「设置脚本没加载」时的兜底值）。
+    var FALLBACK_ATTACK_NON_FACTION = false;
+    // 「敌对目标」识别规则：
+    //   1) 原版非友好生物 —— 实现 org.bukkit.entity.Enemy 的实体（僵尸 / 骷髅 / 苦力怕…）
+    //   2) 自定义 BOSS / 自定义生物 —— 按 tag 约定：精确命中 HOSTILE_TAGS_EXACT，
+    //      或 tag 以 HOSTILE_TAG_SUFFIXES 里的后缀结尾（仓库现有约定是 "_boss"）。
+    //      以后新增自定义生物，只要打上 custom_hostile 标记、或让 tag 以 _boss 结尾，
+    //      就会被自动纳入可攻击范围，不需要改这段代码。
+    var HOSTILE_TAGS_EXACT = ["custom_hostile"];
+    var HOSTILE_TAG_SUFFIXES = ["_boss"];
+
+    function isAggressiveAgainstNonFaction() {
+        try {
+            var api = getShared("BanditFaction");
+            if (api != null && typeof api.isAggressive === "function") {
+                return api.isAggressive() === true;
+            }
+        } catch (e) { }
+        return FALLBACK_ATTACK_NON_FACTION;
+    }
+
+    function isHostileEntity(entity) {
+        try {
+            if (entity == null || !entity.isValid() || entity.isDead()) return false;
+            if (entity instanceof PlayerClass) return false;   // 玩家仍走原有战斗逻辑
+            if (isFactionAlly(entity)) return false;           // 同阵营不打
+            if (entity instanceof EnemyClass) return true;     // 原版敌对生物
+            var tags = entity.getScoreboardTags();
+            var it = tags.iterator();
+            while (it.hasNext()) {
+                var tag = String(it.next());
+                for (var i = 0; i < HOSTILE_TAGS_EXACT.length; i++) {
+                    if (tag === HOSTILE_TAGS_EXACT[i]) return true;
+                }
+                for (var j = 0; j < HOSTILE_TAG_SUFFIXES.length; j++) {
+                    var suf = HOSTILE_TAG_SUFFIXES[j];
+                    if (tag.length > suf.length
+                            && tag.substring(tag.length - suf.length) === suf) return true;
+                }
+            }
+        } catch (e) { }
+        return false;
+    }
+
+    function findNearestHostileEntity(boss) {
+        var best = null;
+        var bestDist = TARGET_RANGE * TARGET_RANGE;
+        try {
+            var it = boss.world.getEntitiesByClass(EntityClass).iterator();
+            while (it.hasNext()) {
+                var e = it.next();
+                if (!isHostileEntity(e)) continue;
+                var d = e.getLocation().distanceSquared(boss.carrier.getLocation());
+                if (d < bestDist) { bestDist = d; best = e; }
+            }
+        } catch (e2) { }
+        return best;
+    }
+
+    // 主动模式下：敌对实体比玩家更近就先处理它，否则维持原有玩家战斗逻辑
+    function pickHostileIfNearer(boss, playerTarget) {
+        try {
+            var hostile = findNearestHostileEntity(boss);
+            if (hostile == null) return null;
+            if (playerTarget == null) return hostile;
+            var loc = boss.carrier.getLocation();
+            var dh = hostile.getLocation().distanceSquared(loc);
+            var dp = playerTarget.getLocation().distanceSquared(loc);
+            return (dh < dp) ? hostile : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // 反击：追到近战距离后按冷却出刀（不占用 boss.action，被围殴时也能还手）
+    function updateRetaliate(boss, foe) {
+        try {
+            var loc = boss.carrier.getLocation();
+            var tl = foe.getLocation();
+            var dx = tl.getX() - loc.getX();
+            var dz = tl.getZ() - loc.getZ();
+            var dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist > MELEE_TRIGGER_RANGE) {
+                updateMovement(boss, foe);
+                return;
+            }
+            faceTarget(boss, tl);
+            if (globalTick < boss.nextRetaliateHitTick) return;
+            boss.nextRetaliateHitTick = globalTick + RETALIATE_COOLDOWN_TICKS;
+            try { foe.damage(RETALIATE_DAMAGE, boss.carrier); } catch (ignored) { }
+            playSoundSafe(boss.world, loc, Sound.ENTITY_PLAYER_ATTACK_SWEEP, 1.1, 0.9);
+            spawnParticleSafe(boss.world, Particle.SWEEP_ATTACK,
+                new Location(boss.world, loc.getX() + dx * 0.4, loc.getY() + 1.2,
+                    loc.getZ() + dz * 0.4),
+                1, 0.0, 0.0, 0.0, 0.0);
+            try {
+                var away = new Vector(dx, 0.35, dz);
+                if (away.lengthSquared() > 0.0001) away = away.normalize().multiply(0.45);
+                foe.setVelocity(away);
+            } catch (ignored) { }
+        } catch (e) {
+            logError("TitlelessKnightElite 反击异常", e);
+        }
+    }
+
+    // 精英改动：战令光环的目标改为「土匪阵营」（带 bandit_faction 的实体），
+    // 不再按各 BOSS 脚本自己的 PDC 键逐个登记。判定见 isFactionEntity()。
 
     // 攻击种类标识
     var KIND_SLASH = "slash";
@@ -191,6 +408,7 @@
     var KIND_STUN = "stun";
     var KIND_ROAR = "roar";
     var KIND_CHARGE = "charge";
+    var KIND_ORDER = "order";             // 精英新增：战令（持续状态，不占用 boss.action）
 
     // 需要免疫的伤害原因（玩家造成的伤害不受此表影响）
     var IGNORED_CAUSE_LIST = "|LAVA|HOT_FLOOR|MELTING|FALL|DROWNING|SUFFOCATION|STARVATION"
@@ -205,8 +423,9 @@
         String(Material.IRON_HELMET), String(Material.IRON_CHESTPLATE),
         String(Material.IRON_LEGGINGS), String(Material.IRON_BOOTS),
         String(Material.NETHERITE_SWORD), String(Material.EMERALD), String(Material.SHIELD),
-        String(Enchantment.SHARPNESS),
+        String(Enchantment.SHARPNESS), String(Enchantment.PROTECTION),
         String(Particle.CRIT), String(Particle.ENCHANTED_HIT), String(Particle.SWEEP_ATTACK),
+        String(Particle.END_ROD),
         String(Particle.LARGE_SMOKE), String(Particle.SOUL), String(Particle.SMOKE),
         String(Sound.ENTITY_PLAYER_ATTACK_SWEEP), String(Sound.ENTITY_PLAYER_ATTACK_STRONG),
         String(Sound.ENTITY_PLAYER_ATTACK_CRIT), String(Sound.ITEM_SHIELD_BLOCK),
@@ -216,8 +435,10 @@
         String(Sound.ENTITY_IRON_GOLEM_ATTACK), String(Sound.ENTITY_IRON_GOLEM_HURT),
         String(Sound.ENTITY_IRON_GOLEM_DEATH), String(Sound.ENTITY_ZOMBIE_DEATH),
         String(Sound.ENTITY_GENERIC_EXPLODE), String(Sound.ENTITY_ZOMBIE_VILLAGER_CURE),
+        String(Sound.BLOCK_BEACON_ACTIVATE),
         String(Particle.HAPPY_VILLAGER),
         String(PotionEffectType.SLOWNESS), String(PotionEffectType.WEAKNESS),
+        String(PotionEffectType.RESISTANCE), String(PotionEffectType.SPEED),
         String(Attribute.MAX_HEALTH), String(Attribute.KNOCKBACK_RESISTANCE),
         String(Attribute.MOVEMENT_SPEED), String(Attribute.ATTACK_DAMAGE),
         String(BarColor.RED), String(BarStyle.SOLID), String(GameMode.SPECTATOR),
@@ -264,7 +485,7 @@
                 try {
                     current[i].fn();
                 } catch (e) {
-                    logError("TitlelessKnight 延迟任务异常", e);
+                    logError("TitlelessKnightElite 延迟任务异常", e);
                 }
             } else {
                 syncDelayedTasks.push(current[i]);
@@ -324,7 +545,7 @@
                 }
             }
         } catch (e) {
-            logError("TitlelessKnight 查找最近玩家异常", e);
+            logError("TitlelessKnightElite 查找最近玩家异常", e);
         }
         return best;
     }
@@ -381,20 +602,31 @@
         try {
             sword.addUnsafeEnchantment(Enchantment.SHARPNESS, SWORD_SHARPNESS_LEVEL);
         } catch (e) {
-            logError("TitlelessKnight 给下界合金剑附魔失败", e);
+            logError("TitlelessKnightElite 给下界合金剑附魔失败", e);
         }
         return sword;
+    }
+
+    // 精英改动：生成一件附魔「保护 III」的铁甲
+    function createProtectedArmor(material) {
+        var piece = new ItemStack(material);
+        try {
+            piece.addUnsafeEnchantment(Enchantment.PROTECTION, ARMOR_PROTECTION_LEVEL);
+        } catch (e) {
+            logError("TitlelessKnightElite 给铁甲附魔保护失败", e);
+        }
+        return piece;
     }
 
     function equipKnight(carrier) {
         try {
             var equipment = carrier.getEquipment();
             if (equipment == null) return;
-            // 需求：护甲由下界合金甲改为铁甲
-            equipment.setHelmet(new ItemStack(Material.IRON_HELMET));
-            equipment.setChestplate(new ItemStack(Material.IRON_CHESTPLATE));
-            equipment.setLeggings(new ItemStack(Material.IRON_LEGGINGS));
-            equipment.setBoots(new ItemStack(Material.IRON_BOOTS));
+            // 需求：护甲由下界合金甲改为铁甲；精英改动：四件全部附魔 保护 III
+            equipment.setHelmet(createProtectedArmor(Material.IRON_HELMET));
+            equipment.setChestplate(createProtectedArmor(Material.IRON_CHESTPLATE));
+            equipment.setLeggings(createProtectedArmor(Material.IRON_LEGGINGS));
+            equipment.setBoots(createProtectedArmor(Material.IRON_BOOTS));
             equipment.setItemInMainHand(createKnightSword());
             // 掉落率为 0：BOSS 死亡不掉装备
             equipment.setHelmetDropChance(0.0);
@@ -403,7 +635,7 @@
             equipment.setBootsDropChance(0.0);
             equipment.setItemInMainHandDropChance(0.0);
         } catch (e) {
-            logError("TitlelessKnight 穿戴铁甲 / 下界合金剑失败", e);
+            logError("TitlelessKnightElite 穿戴铁甲 / 下界合金剑失败", e);
         }
     }
 
@@ -415,7 +647,7 @@
             bar.setProgress(1.0);
             bar.setVisible(true);
         } catch (e) {
-            logError("TitlelessKnight 创建 BossBar 失败", e);
+            logError("TitlelessKnightElite 创建 BossBar 失败", e);
             bar = null;
         }
         return bar;
@@ -433,7 +665,7 @@
             // M-5：必须传 Class.forName(...) 得到的 java.lang.Class。
             var carrier = world.spawn(spawnLoc, HuskClass);
             if (carrier == null) {
-                logError("TitlelessKnight 生成失败", "world.spawn 返回 null");
+                logError("TitlelessKnightElite 生成失败", "world.spawn 返回 null");
                 return false;
             }
 
@@ -451,7 +683,7 @@
             carrier.setCustomNameVisible(false);
             try { carrier.setShouldBurnInDay(false); } catch (ignored) { }
             carrier.addScoreboardTag(BOSS_TAG);
-            // 阵营战斗补丁：加入「流寇」阵营
+            // 土匪阵营：faction tag + 加入 [土匪] 队伍
             carrier.addScoreboardTag(FACTION_TAG);
             joinFactionTeam(carrier);
             carrier.getPersistentDataContainer().set(bossKey, PersistentDataType.STRING, BOSS_ID);
@@ -470,7 +702,7 @@
             try {
                 carrier.setHealth(MAX_HEALTH);
             } catch (e) {
-                logError("TitlelessKnight 设置生命值失败", e);
+                logError("TitlelessKnightElite 设置生命值失败", e);
             }
             equipKnight(carrier);
 
@@ -494,6 +726,11 @@
                 nextMeleeTick: globalTick + INITIAL_MELEE_DELAY_TICKS,
                 nextRoarTick: globalTick + INITIAL_ROAR_DELAY_TICKS,
                 nextChargeTick: globalTick + INITIAL_CHARGE_DELAY_TICKS,
+                // 精英新增：战令状态（光环是持续状态，与 boss.action 互不占用）
+                nextOrderTick: globalTick + ORDER_INITIAL_DELAY_TICKS,
+                orderEndTick: 0,
+                nextOrderBuffTick: 0,
+                orderCastCount: 0,
                 lastMeleeKind: null,
                 dead: false,
                 deathStartTick: 0,
@@ -505,12 +742,12 @@
             playSoundSafe(world, spawnLoc, Sound.BLOCK_ANVIL_LAND, 1.2, 0.7);
             spawnParticleSafe(world, Particle.LARGE_SMOKE, spawnLoc, 30, 1.0, 1.0, 1.0, 0.05);
             spawnParticleSafe(world, Particle.CRIT, spawnLoc, 25, 1.2, 1.0, 1.2, 0.15);
-            log.info("TitlelessKnight 生成成功：" + uuid + " @ " + world.getName()
+            log.info("TitlelessKnightElite 生成成功：" + uuid + " @ " + world.getName()
                 + " (" + Math.round(spawnLoc.getX()) + "," + Math.round(spawnLoc.getY())
                 + "," + Math.round(spawnLoc.getZ()) + ")");
             return true;
         } catch (e) {
-            logError("TitlelessKnight 生成失败", e);
+            logError("TitlelessKnightElite 生成失败", e);
             return false;
         }
     }
@@ -534,7 +771,7 @@
             }
         } catch (ignored) { }
         delete activeBosses[boss.uuid];
-        log.info("TitlelessKnight 已清理 BOSS：" + boss.uuid);
+        log.info("TitlelessKnightElite 已清理 BOSS：" + boss.uuid);
     }
 
     // 本脚本实例当前活着的载具 UUID 集合：
@@ -557,7 +794,7 @@
                 removed++;
             }
         } catch (e) {
-            logError("TitlelessKnight 清理带 Tag 实体异常", e);
+            logError("TitlelessKnightElite 清理带 Tag 实体异常", e);
         }
         return removed;
     }
@@ -574,7 +811,7 @@
         try {
             Bukkit.removeBossBar(barKey);
         } catch (e) {
-            logError("TitlelessKnight 清理孤儿 BossBar 异常", e);
+            logError("TitlelessKnightElite 清理孤儿 BossBar 异常", e);
         }
     }
 
@@ -587,9 +824,9 @@
                 removed += removeTaggedEntities(worlds.get(i), BOSS_TAG);
             }
             cleanupOrphanBossBars();
-            if (removed > 0) log.info("TitlelessKnight 清理孤儿实体：" + removed + " 个。");
+            if (removed > 0) log.info("TitlelessKnightElite 清理孤儿实体：" + removed + " 个。");
         } catch (e) {
-            logError("TitlelessKnight 清理孤儿实体异常", e);
+            logError("TitlelessKnightElite 清理孤儿实体异常", e);
         }
     }
 
@@ -632,18 +869,18 @@
                     handle.setXRot(pitch);
                     if (headRotationViaNms === null) {
                         headRotationViaNms = true;
-                        log.info("TitlelessKnight 头部朝向：已启用 NMS 直接写入（setYHeadRot/setYBodyRot）。");
+                        log.info("TitlelessKnightElite 头部朝向：已启用 NMS 直接写入（setYHeadRot/setYBodyRot）。");
                     }
                 } catch (e) {
                     if (headRotationViaNms === null) {
                         headRotationViaNms = false;
-                        log.warn("TitlelessKnight 头部朝向：NMS 通道不可用，退化为 setRotation + lookAt（"
+                        log.warn("TitlelessKnightElite 头部朝向：NMS 通道不可用，退化为 setRotation + lookAt（"
                             + e + "）。");
                     }
                 }
             }
         } catch (e) {
-            logError("TitlelessKnight 朝向计算异常", e);
+            logError("TitlelessKnightElite 朝向计算异常", e);
         }
         boss.faceYaw = yaw;
         boss.facePitch = pitch;
@@ -725,7 +962,7 @@
             boss.carrier.teleport(new Location(boss.world, nextX, nextY, nextZ,
                 faceYaw, boss.facePitch));
         } catch (e) {
-            logError("TitlelessKnight 移动异常", e);
+            logError("TitlelessKnightElite 移动异常", e);
         }
     }
 
@@ -840,7 +1077,7 @@
                     + " 次攻击，恐惧战吼的虚弱已被驱散。");
             } catch (ignored) { }
         } catch (e) {
-            logError("TitlelessKnight 盾牌格挡驱散虚弱异常", e);
+            logError("TitlelessKnightElite 盾牌格挡驱散虚弱异常", e);
         }
     }
 
@@ -892,7 +1129,7 @@
                 player.damage(amount);
             }
         } catch (e) {
-            logError("TitlelessKnight 造成伤害失败", e);
+            logError("TitlelessKnightElite 造成伤害失败", e);
             return false;
         }
         try {
@@ -949,7 +1186,7 @@
                 if (isInMeleeArc(boss, p, range, verticalTolerance)) result.push(p);
             }
         } catch (e) {
-            logError("TitlelessKnight 近战目标收集异常", e);
+            logError("TitlelessKnightElite 近战目标收集异常", e);
         }
         return result;
     }
@@ -993,9 +1230,13 @@
                 STUN_SLOW_TICKS, STUN_SLOW_AMPLIFIER, false, true, true));
         } catch (ignored) { }
         knockbackPlayer(boss, player, STUN_KNOCKBACK, 0.18);
+        if (SHOW_STUN_HIT_MESSAGE) {
+            try {
+                player.sendMessage(ChatColor.DARK_RED + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+                    + "你被眩晕击命中：缓慢 III " + (STUN_SLOW_TICKS / 20) + " 秒。");
+            } catch (ignored) { }
+        }
         try {
-            player.sendMessage(ChatColor.DARK_RED + "[" + BOSS_NAME + "] " + ChatColor.GRAY
-                + "你被眩晕击命中：缓慢 III " + (STUN_SLOW_TICKS / 20) + " 秒。");
             player.sendActionBar(ChatColor.DARK_RED + "眩晕！" + ChatColor.GRAY + "缓慢 III "
                 + (STUN_SLOW_TICKS / 20) + "s");
         } catch (ignored) { }
@@ -1011,10 +1252,12 @@
         }
         var dealt = dealPlayerDamage(player, CHARGE_DAMAGE, boss);
         knockbackPlayer(boss, player, CHARGE_KNOCKBACK, 0.35);
-        try {
-            player.sendMessage(ChatColor.DARK_RED + "[" + BOSS_NAME + "] " + ChatColor.GRAY
-                + "你被冲锋撞飞了！");
-        } catch (ignored) { }
+        if (SHOW_CHARGE_HIT_MESSAGE) {
+            try {
+                player.sendMessage(ChatColor.DARK_RED + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+                    + "你被冲锋撞飞了！");
+            } catch (ignored) { }
+        }
         return dealt ? "hit" : "noeffect";
     }
 
@@ -1100,7 +1343,7 @@
         };
         boss.action = act;
         boss.nextRoarTick = act.startTick + ROAR_COOLDOWN_TICKS;
-        log.info("TitlelessKnight 恐惧战吼开始蓄力。");
+        log.info("TitlelessKnightElite 恐惧战吼开始蓄力。");
         return act;
     }
 
@@ -1121,13 +1364,33 @@
             travelled: 0.0,
             hitPlayers: {},
             targetRef: target,
-            targetUuid: (target != null) ? String(target.getUniqueId().toString()) : null
+            targetUuid: (target != null) ? String(target.getUniqueId().toString()) : null,
+            // 精英改动：一次施放连冲 2 段
+            chargesTotal: ELITE_CHARGE_COUNT,
+            chargesDone: 0
         };
         boss.action = act;
         boss.nextChargeTick = act.startTick + CHARGE_COOLDOWN_TICKS;
         playSoundSafe(boss.world, boss.carrier.getLocation(), Sound.ENTITY_RAVAGER_ROAR, 1.5, 0.8);
-        log.info("TitlelessKnight 冲锋蓄力。");
+        log.info("TitlelessKnightElite 冲锋蓄力（第 1/" + act.chargesTotal + " 段）。");
         return act;
+    }
+
+    // 精英改动：一段冲刺结束后调用。还有剩余段数就重新进入预警（并重新锁定最近的玩家），
+    // 返回 true 表示「还有下一段」；返回 false 表示本次冲锋彻底结束。
+    function restartChargeSegment(boss, act) {
+        act.chargesDone++;
+        if (act.chargesDone >= act.chargesTotal) return false;
+        act.phase = "windup";
+        act.windupEndTick = globalTick + CHARGE_WINDUP_TICKS;
+        act.endTick = globalTick + CHARGE_WINDUP_TICKS + CHARGE_MAX_TICKS;
+        act.travelled = 0.0;
+        act.hitPlayers = {};        // 新一段可以再次命中同一批玩家
+        var next = findNearestPlayer(boss);
+        if (next != null) act.targetRef = next;
+        playSoundSafe(boss.world, boss.carrier.getLocation(), Sound.ENTITY_RAVAGER_ROAR, 1.3, 0.95);
+        log.info("TitlelessKnightElite 冲锋蓄力（第 " + (act.chargesDone + 1) + "/" + act.chargesTotal + " 段）。");
+        return true;
     }
 
     function finishAction(boss, act) {
@@ -1308,9 +1571,9 @@
                 affected++;
             }
         } catch (e) {
-            logError("TitlelessKnight 恐惧战吼结算异常", e);
+            logError("TitlelessKnightElite 恐惧战吼结算异常", e);
         }
-        log.info("TitlelessKnight 恐惧战吼命中 " + affected + " 名玩家。");
+        log.info("TitlelessKnightElite 恐惧战吼命中 " + affected + " 名玩家。");
     }
 
     // ---- 冲锋 ----
@@ -1348,11 +1611,13 @@
             spawnParticleSafe(boss.world, Particle.CRIT,
                 new Location(boss.world, loc.getX(), loc.getY() + 1.0, loc.getZ()),
                 20, 0.6, 0.6, 0.6, 0.15);
-            finishAction(boss, act);
+            // 精英改动：撞墙只结束这一段，还有剩余段数就接着冲
+            if (!restartChargeSegment(boss, act)) finishAction(boss, act);
             return;
         }
         if (act.travelled >= CHARGE_MAX_TRAVEL || globalTick >= act.endTick) {
-            finishAction(boss, act);
+            // 精英改动：位移走完只结束这一段，还有剩余段数就接着冲
+            if (!restartChargeSegment(boss, act)) finishAction(boss, act);
         }
     }
 
@@ -1399,7 +1664,7 @@
                 resolveChargeHit(boss, p);
             }
         } catch (e) {
-            logError("TitlelessKnight 冲锋命中判定异常", e);
+            logError("TitlelessKnightElite 冲锋命中判定异常", e);
         }
     }
 
@@ -1413,174 +1678,99 @@
     }
 
     // -----------------------------------------------------------------------
-    // 战斗总控
+    // 精英新增技能：战令
     // -----------------------------------------------------------------------
-    // =======================================================================
-    // 阵营战斗补丁（与精英三人组同构；本体三人组同属「流寇」阵营）
-    //   · 同阵营（liukou_faction）之间关闭友伤
-    //   · 可被非同阵营的生物实体伤害（原版敌对生物 / 其它自定义 BOSS / 自定义生物）
-    //   · 挨打后进入反击状态：追上去按冷却还手
-    //   · /faction attack on 时主动出击（开关由 FactionSettings.js 持有并持久化）
-    // =======================================================================
-    var FACTION_TAG = "liukou_faction";
-    var FACTION_TEAM = "liukou";
-    var FACTION_PREFIX = ChatColor.DARK_GRAY + "[流寇] " + ChatColor.RESET;
-    var PATCH_ENTITY_CLASS = Class.forName("org.bukkit.entity.Entity");
-    // 注意：instanceof 的右操作数必须用 Java.type（Class.forName 的结果不能用于 instanceof）
-    var PATCH_ENEMY_CLASS = Java.type("org.bukkit.entity.Enemy");
-
-    var FALLBACK_ATTACK_NON_FACTION = false;
-    var HOSTILE_TAGS_EXACT = ["custom_hostile"];
-    var HOSTILE_TAG_SUFFIXES = ["_boss"];
-    var RETALIATE_MEMORY_TICKS = 200;      // 挨打后 10 秒内保持反击目标
-    var RETALIATE_COOLDOWN_TICKS = 20;     // 每 1 秒还手一次
-    var RETALIATE_DAMAGE = 6.0;            // 反击伤害
-
-    function joinFactionTeam(entity) {
+    // 判定实体能不能吃到战令光环：精英改动 —— 只认「土匪」阵营
+    // （带 bandit_faction 的实体，含三个精英自己；不再按各 BOSS 脚本的 PDC 键判断）
+    function isFactionEntity(entity) {
         try {
-            var sb = Bukkit.getScoreboardManager().getMainScoreboard();
-            var team = sb.getTeam(FACTION_TEAM);
-            if (team == null) {
-                team = sb.registerNewTeam(FACTION_TEAM);
-                team.setDisplayName("[流寇]");
-            }
-            team.setPrefix(FACTION_PREFIX);
-            var entry = String(entity.getUniqueId().toString());
-            if (!team.hasEntry(entry)) team.addEntry(entry);
-        } catch (e) {
-            logError("TitlelessKnight 加入流寇阵营失败", e);
-        }
-    }
-
-    function isFactionAlly(entity) {
-        try {
-            if (entity == null) return false;
+            if (entity == null || !entity.isValid()) return false;
             return entity.getScoreboardTags().contains(FACTION_TAG);
-        } catch (e) {
-            return false;
-        }
-    }
-
-    function markRetaliate(boss, attacker) {
-        try {
-            if (attacker == null || !attacker.isValid()) return;
-            if (String(attacker.getUniqueId().toString()) === boss.uuid) return;
-            if (boss.nextRetaliateHitTick == null) boss.nextRetaliateHitTick = 0;
-            boss.retaliateTarget = attacker;
-            boss.retaliateUntilTick = globalTick + RETALIATE_MEMORY_TICKS;
-        } catch (ignored) { }
-    }
-
-    function resolveRetaliateTarget(boss) {
-        var t = boss.retaliateTarget;
-        if (t == null) return null;
-        try {
-            if (!t.isValid() || t.isDead()) { boss.retaliateTarget = null; return null; }
-        } catch (e) {
-            boss.retaliateTarget = null;
-            return null;
-        }
-        if (globalTick > boss.retaliateUntilTick) { boss.retaliateTarget = null; return null; }
-        return t;
-    }
-
-    function isAggressiveAgainstNonFaction() {
-        try {
-            var api = getShared("FactionSettings");
-            if (api == null) api = getShared("BanditFaction");
-            if (api != null && typeof api.isAggressive === "function") {
-                return api.isAggressive() === true;
-            }
-        } catch (e) { }
-        return FALLBACK_ATTACK_NON_FACTION;
-    }
-
-    function isHostileEntity(entity) {
-        try {
-            if (entity == null || !entity.isValid() || entity.isDead()) return false;
-            if (entity instanceof PlayerClass) return false;   // 玩家仍走原有战斗逻辑
-            if (isFactionAlly(entity)) return false;           // 同阵营不打
-            if (entity instanceof PATCH_ENEMY_CLASS) return true;   // 原版敌对生物
-            var tags = entity.getScoreboardTags();
-            var it = tags.iterator();
-            while (it.hasNext()) {
-                var tag = String(it.next());
-                for (var i = 0; i < HOSTILE_TAGS_EXACT.length; i++) {
-                    if (tag === HOSTILE_TAGS_EXACT[i]) return true;
-                }
-                for (var j = 0; j < HOSTILE_TAG_SUFFIXES.length; j++) {
-                    var suf = HOSTILE_TAG_SUFFIXES[j];
-                    if (tag.length > suf.length
-                            && tag.substring(tag.length - suf.length) === suf) return true;
-                }
-            }
         } catch (e) { }
         return false;
     }
 
-    function findNearestHostileEntity(boss) {
-        var best = null;
-        var bestDist = TARGET_RANGE * TARGET_RANGE;
-        try {
-            var it = boss.world.getEntitiesByClass(PATCH_ENTITY_CLASS).iterator();
-            while (it.hasNext()) {
-                var e = it.next();
-                if (!isHostileEntity(e)) continue;
-                var d = e.getLocation().distanceSquared(boss.carrier.getLocation());
-                if (d < bestDist) { bestDist = d; best = e; }
-            }
-        } catch (e2) { }
-        return best;
+    function startBattleOrder(boss) {
+        boss.orderEndTick = globalTick + ORDER_DURATION_TICKS;
+        boss.nextOrderTick = globalTick + ORDER_COOLDOWN_TICKS;   // 冷却从施放时刻起算
+        boss.nextOrderBuffTick = 0;                               // 立刻上第一轮 buff
+        boss.orderCastCount++;
+        var loc = boss.carrier.getLocation();
+        playSoundSafe(boss.world, loc, Sound.BLOCK_BEACON_ACTIVATE, 1.6, 0.8);
+        playSoundSafe(boss.world, loc, Sound.ENTITY_RAVAGER_ROAR, 1.2, 1.25);
+        log.info("TitlelessKnightElite 战令启动：半径 " + ORDER_RADIUS + " 格，持续 "
+            + Math.round(ORDER_DURATION_TICKS / 20) + " 秒。");
     }
 
-    // 主动模式下：敌对实体比玩家更近就先打它
-    function pickHostileIfNearer(boss, playerTarget) {
+    // 给光环内的自定义 BOSS 刷新 抗性提升 III + 速度 II
+    function applyBattleOrderBuffs(boss) {
+        var center = boss.carrier.getLocation();
+        var affected = 0;
         try {
-            var hostile = findNearestHostileEntity(boss);
-            if (hostile == null) return null;
-            if (playerTarget == null) return hostile;
-            var loc = boss.carrier.getLocation();
-            var dh = hostile.getLocation().distanceSquared(loc);
-            var dp = playerTarget.getLocation().distanceSquared(loc);
-            return (dh < dp) ? hostile : null;
+            var nearby = boss.world.getNearbyEntities(center, ORDER_RADIUS, ORDER_RADIUS, ORDER_RADIUS);
+            for (var i = 0; i < nearby.size(); i++) {
+                var ent = nearby.get(i);
+                if (!isFactionEntity(ent)) continue;
+                if (ent.getLocation().distanceSquared(center) > ORDER_RADIUS * ORDER_RADIUS) continue;
+                if (!ORDER_BUFF_SELF && String(ent.getUniqueId().toString()) === boss.uuid) continue;
+                try {
+                    ent.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE,
+                        ORDER_BUFF_TICKS, ORDER_RESISTANCE_AMPLIFIER, false, true, true));
+                    ent.addPotionEffect(new PotionEffect(PotionEffectType.SPEED,
+                        ORDER_BUFF_TICKS, ORDER_SPEED_AMPLIFIER, false, true, true));
+                } catch (ignored) { }
+                affected++;
+                spawnParticleSafe(boss.world, Particle.HAPPY_VILLAGER,
+                    new Location(boss.world, ent.getLocation().getX(),
+                        ent.getLocation().getY() + 2.2, ent.getLocation().getZ()),
+                    6, 0.4, 0.3, 0.4, 0.0);
+            }
         } catch (e) {
-            return null;
+            logError("TitlelessKnightElite 战令 buff 结算异常", e);
         }
+        return affected;
     }
 
-    // 反击：追到近战距离后按冷却出刀（不占用 boss.action，被围殴时也能还手）
-    function updateRetaliate(boss, foe) {
-        try {
-            var loc = boss.carrier.getLocation();
-            var tl = foe.getLocation();
-            var dx = tl.getX() - loc.getX();
-            var dz = tl.getZ() - loc.getZ();
-            var dist = Math.sqrt(dx * dx + dz * dz);
-            if (dist > MELEE_TRIGGER_RANGE) {
-                updateMovement(boss, foe);
-                return;
-            }
-            try { faceTarget(boss, tl); } catch (ignored) { }
-            if (globalTick < boss.nextRetaliateHitTick) return;
-            boss.nextRetaliateHitTick = globalTick + RETALIATE_COOLDOWN_TICKS;
-            try { foe.damage(RETALIATE_DAMAGE, boss.carrier); } catch (ignored) { }
-            playSoundSafe(boss.world, loc, Sound.ENTITY_PLAYER_ATTACK_SWEEP, 1.1, 0.9);
-            spawnParticleSafe(boss.world, Particle.SWEEP_ATTACK,
-                new Location(boss.world, loc.getX() + dx * 0.4, loc.getY() + 1.2,
-                    loc.getZ() + dz * 0.4),
+    // 光环可视化：在半径 16 格处画一圈 END_ROD 粒子（每 4 tick 一次）
+    function drawBattleOrderRing(boss) {
+        if (globalTick % 4 !== 0) return;
+        var center = boss.carrier.getLocation();
+        var step = (Math.PI * 2) / ORDER_RING_POINTS;
+        for (var i = 0; i < ORDER_RING_POINTS; i++) {
+            var a = step * i;
+            spawnParticleSafe(boss.world, Particle.END_ROD,
+                new Location(boss.world,
+                    center.getX() + Math.cos(a) * ORDER_RADIUS,
+                    center.getY() + 0.15,
+                    center.getZ() + Math.sin(a) * ORDER_RADIUS),
                 1, 0.0, 0.0, 0.0, 0.0);
-        } catch (e) {
-            logError("TitlelessKnight 反击异常", e);
         }
     }
-    // ===================== 阵营战斗补丁结束 =====================
 
+    // 每 tick 调用一次。战令是「持续状态」而不是 boss.action，
+    // 因此光环期间骑士照常移动、放冲锋 / 战吼 / 大剑，互不阻塞。
+    function updateBattleOrder(boss) {
+        if (boss.orderEndTick <= globalTick && globalTick >= boss.nextOrderTick) {
+            startBattleOrder(boss);
+        }
+        if (boss.orderEndTick <= globalTick) return;
+        drawBattleOrderRing(boss);
+        if (globalTick >= boss.nextOrderBuffTick) {
+            boss.nextOrderBuffTick = globalTick + ORDER_BUFF_REFRESH_TICKS;
+            applyBattleOrderBuffs(boss);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 战斗总控
+    // -----------------------------------------------------------------------
     function updateCombat(boss) {
         var target = findNearestPlayer(boss);
         boss.target = target;
 
-        // 阵营战斗补丁：反击优先 + 主动攻击模式（谁近打谁）
+        // 精英改动 1：反击优先 —— 被非同阵营的生物实体打过就先打回去
         var foe = resolveRetaliateTarget(boss);
+        // 精英改动 2：主动攻击模式（/bandit attack on）—— 敌对实体比玩家更近就先打它
         if (foe == null && isAggressiveAgainstNonFaction()) {
             foe = pickHostileIfNearer(boss, target);
         }
@@ -1669,7 +1859,7 @@
             playSoundSafe(boss.world, boss.deathLocation, Sound.ENTITY_ZOMBIE_DEATH, 1.4, 0.8);
             spawnParticleSafe(boss.world, Particle.LARGE_SMOKE, boss.deathLocation, 40, 0.8, 1.0, 0.8, 0.05);
         }
-        log.info("TitlelessKnight 进入死亡序列：" + boss.uuid);
+        log.info("TitlelessKnightElite 进入死亡序列：" + boss.uuid);
     }
 
     function updateDeathSequence(boss) {
@@ -1677,7 +1867,7 @@
             spawnParticleSafe(boss.world, Particle.SOUL, boss.deathLocation, 8, 0.6, 0.8, 0.6, 0.02);
         }
         if (globalTick >= boss.deathEndTick) {
-            log.info("TitlelessKnight 死亡序列完成。");
+            log.info("TitlelessKnightElite 死亡序列完成。");
             cleanupBoss(boss);
         }
     }
@@ -1693,6 +1883,12 @@
         }
         try { boss.carrier.setFireTicks(0); } catch (ignored) { }
         updateBossBar(boss);
+        // 精英新增：战令光环（持续状态，不占用 boss.action，不影响其它技能）
+        try {
+            updateBattleOrder(boss);
+        } catch (e) {
+            logError("TitlelessKnightElite 战令异常", e);
+        }
         updateCombat(boss);
     }
 
@@ -1704,7 +1900,7 @@
             try {
                 updateBoss(boss);
             } catch (e) {
-                logError("TitlelessKnight BOSS[" + uuids[i] + "] tick 异常", e);
+                logError("TitlelessKnightElite BOSS[" + uuids[i] + "] tick 异常", e);
             }
         }
     }
@@ -1739,7 +1935,8 @@
                     if (attacker == null) attacker = source.getDirectEntity();
                 }
                 if (attacker != null && !(attacker instanceof PlayerClass)) {
-                    // 阵营战斗补丁：可被非同阵营生物实体伤害并反击；同阵营（流寇）友伤关闭
+                    // 精英改动：可以被其它生物实体（小怪 / 非同阵营的自定义 BOSS）伤害，
+                    // 并进入反击状态；同阵营（土匪）之间关闭友伤。
                     if (isFactionAlly(attacker)) {
                         event.setCancelled(true);
                         return;
@@ -1747,7 +1944,7 @@
                     markRetaliate(boss, attacker);
                 }
             } catch (e) {
-                logError("TitlelessKnight 受伤事件异常", e);
+                logError("TitlelessKnightElite 受伤事件异常", e);
             }
         });
 
@@ -1769,7 +1966,7 @@
                         6, 0.4, 0.4, 0.4, 0.05);
                 }
             } catch (e) {
-                logError("TitlelessKnight 近战/远程事件异常", e);
+                logError("TitlelessKnightElite 近战/远程事件异常", e);
             }
         });
 
@@ -1784,7 +1981,7 @@
                 } catch (ignored) { }
                 startDeathSequence(boss);
             } catch (e) {
-                logError("TitlelessKnight 死亡事件异常", e);
+                logError("TitlelessKnightElite 死亡事件异常", e);
             }
         });
 
@@ -1798,19 +1995,19 @@
         try {
             processSyncDelayedTasks();
         } catch (e) {
-            logError("TitlelessKnight 延迟队列异常", e);
+            logError("TitlelessKnightElite 延迟队列异常", e);
         }
         try {
             updateAllBosses();
         } catch (e) {
-            logError("TitlelessKnight 主循环异常", e);
+            logError("TitlelessKnightElite 主循环异常", e);
         }
         // 每秒清理一次「恐惧战吼虚弱」的格挡进度（虚弱已结束 / 玩家已下线的条目）
         if (globalTick % 20 === 0) {
             try {
                 decayRoarWeakness();
             } catch (e) {
-                logError("TitlelessKnight 虚弱进度清理异常", e);
+                logError("TitlelessKnightElite 虚弱进度清理异常", e);
             }
         }
     });
@@ -1841,7 +2038,7 @@
                 registeredThisInstance = true;
             }
         } catch (e) {
-            logError("TitlelessKnight 注册异常", e);
+            logError("TitlelessKnightElite 注册异常", e);
         }
     }
 
@@ -1851,5 +2048,5 @@
     // -----------------------------------------------------------------------
     // 启动日志（契约第 10 节：必须能看到脚本自己的加载日志）
     // -----------------------------------------------------------------------
-    log.info("TitlelessKnight 已加载：使用 /call boss " + BOSS_NAME + " 获取召唤绿宝石。");
+    log.info("TitlelessKnightElite 已加载：使用 /call boss " + BOSS_NAME + " 获取召唤绿宝石。");
 })();

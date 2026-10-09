@@ -1089,8 +1089,22 @@
         } catch (e) { }
     }
 
+    // 战令联动：脚本 BOSS 靠逐 tick 传送移动（setAI(false)），原版速度属性 / 药水
+    // 对它没有任何作用。这里主动读取自身「速度」效果并放大位移步长，
+    // 每级 +20%（与原生一致：速度 II = ×1.4），效果消失后自动恢复原速。
+    function scriptedSpeedFactor(entity) {
+        try {
+            var pe = entity.getPotionEffect(PotionEffectType.SPEED);
+            if (pe == null) return 1.0;
+            return 1.0 + 0.2 * (pe.getAmplifier() + 1);
+        } catch (e) {
+            return 1.0;
+        }
+    }
+
     function getMoveSpeed(boss) {
-        return WALK_SPEED * (isHard(boss) ? HARD_MOVE_SPEED_MULT : 1.0);
+        return WALK_SPEED * (isHard(boss) ? HARD_MOVE_SPEED_MULT : 1.0)
+            * scriptedSpeedFactor(boss.carrier);
     }
 
     function refreshHardChargeTargets(boss) {
@@ -3619,6 +3633,11 @@ registerEvent("org.bukkit.event.entity.EntityDamageEvent", function(event) {
         if (attacker != null) {
             if (!isPlayerDamageSource(attacker) && !isDisorderDamageSource(attacker)
                     && !isDouQuQuActive(boss)) {
+                // 阵营战斗补丁：非同阵营的生物实体也能造成伤害，并记入反击目标。
+                // 本体 HP 走计分板，所以这里自行调用 damageBossByScoreboard 结算。
+                if (isFactionAlly(attacker)) return;
+                markRetaliate(boss, attacker);
+                damageBossByScoreboard(boss, event.getFinalDamage());
                 return;
             }
         }
@@ -4312,6 +4331,165 @@ function drawGuardianLaser(world, from, to) {
         }
     }
 
+    // =======================================================================
+    // 阵营战斗补丁（独立 BOSS：无阵营，对所有人都是「非同阵营」）
+    //   · 可以被其它生物实体伤害（事件里走 damageBossByScoreboard 结算）
+    //   · 挨打后进入反击状态，按冷却还手
+    //   · /faction attack on 时主动攻击非同阵营目标
+    // =======================================================================
+    var PATCH_ENTITY_CLASS = Class.forName("org.bukkit.entity.Entity");
+    // 注意：instanceof 的右操作数必须用 Java.type（Class.forName 的结果不能用于 instanceof）
+    var PATCH_ENEMY_CLASS = Java.type("org.bukkit.entity.Enemy");
+    var PATCH_FACTION_TAG = null;          // 独立 BOSS 无阵营
+    var PATCH_CHASE_RANGE = 6.0;
+    var PATCH_FORCE_RANGE = 32.0;
+    var FALLBACK_ATTACK_NON_FACTION = false;
+    var HOSTILE_TAGS_EXACT = ["custom_hostile"];
+    var HOSTILE_TAG_SUFFIXES = ["_boss"];
+    var RETALIATE_MEMORY_TICKS = 200;
+    var RETALIATE_COOLDOWN_TICKS = 30;
+    var RETALIATE_DAMAGE = 8.0;
+
+    function isFactionAlly(entity) {
+        if (PATCH_FACTION_TAG == null) return false;
+        try {
+            return entity.getScoreboardTags().contains(PATCH_FACTION_TAG);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function markRetaliate(unit, attacker) {
+        try {
+            if (attacker == null || !attacker.isValid()) return;
+            if (unit == null || unit.carrier == null) return;
+            if (String(attacker.getUniqueId().toString())
+                    === String(unit.carrier.getUniqueId().toString())) return;
+            if (unit.nextRetaliateHitTick == null) unit.nextRetaliateHitTick = 0;
+            unit.retaliateTarget = attacker;
+            unit.retaliateUntilTick = globalTick + RETALIATE_MEMORY_TICKS;
+        } catch (ignored) { }
+    }
+
+    function resolveRetaliateTarget(unit) {
+        var t = unit.retaliateTarget;
+        if (t == null) return null;
+        try {
+            if (!t.isValid() || t.isDead()) { unit.retaliateTarget = null; return null; }
+        } catch (e) {
+            unit.retaliateTarget = null;
+            return null;
+        }
+        if (globalTick > unit.retaliateUntilTick) { unit.retaliateTarget = null; return null; }
+        return t;
+    }
+
+    function isAggressiveAgainstNonFaction() {
+        try {
+            var api = getShared("FactionSettings");
+            if (api == null) api = getShared("BanditFaction");
+            if (api != null && typeof api.isAggressive === "function") {
+                return api.isAggressive() === true;
+            }
+        } catch (e) { }
+        return FALLBACK_ATTACK_NON_FACTION;
+    }
+
+    function isHostileEntity(entity) {
+        try {
+            if (entity == null || !entity.isValid() || entity.isDead()) return false;
+            if (entity instanceof PlayerClass) return false;
+            if (isFactionAlly(entity)) return false;
+            if (entity instanceof PATCH_ENEMY_CLASS) return true;
+            var tags = entity.getScoreboardTags();
+            var it = tags.iterator();
+            while (it.hasNext()) {
+                var tag = String(it.next());
+                for (var i = 0; i < HOSTILE_TAGS_EXACT.length; i++) {
+                    if (tag === HOSTILE_TAGS_EXACT[i]) return true;
+                }
+                for (var j = 0; j < HOSTILE_TAG_SUFFIXES.length; j++) {
+                    var suf = HOSTILE_TAG_SUFFIXES[j];
+                    if (tag.length > suf.length
+                            && tag.substring(tag.length - suf.length) === suf) return true;
+                }
+            }
+        } catch (e) { }
+        return false;
+    }
+
+    function findNearestHostileEntity(unit) {
+        var best = null;
+        var bestDist = TARGET_RANGE * TARGET_RANGE;
+        try {
+            var it = unit.carrier.getWorld().getEntitiesByClass(PATCH_ENTITY_CLASS).iterator();
+            while (it.hasNext()) {
+                var e = it.next();
+                if (!isHostileEntity(e)) continue;
+                var d = e.getLocation().distanceSquared(unit.carrier.getLocation());
+                if (d < bestDist) { bestDist = d; best = e; }
+            }
+        } catch (e2) { }
+        return best;
+    }
+
+    function patchHostileIfNearer(unit) {
+        try {
+            var hostile = findNearestHostileEntity(unit);
+            if (hostile == null) return null;
+            var p = unit.target;
+            if (p == null || !p.isValid()) return hostile;
+            var loc = unit.carrier.getLocation();
+            var dh = hostile.getLocation().distanceSquared(loc);
+            var dp = p.getLocation().distanceSquared(loc);
+            return (dh < dp) ? hostile : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function patchFx(unit, loc) {
+        try {
+            unit.carrier.getWorld().playSound(loc, Sound.ENTITY_BLAZE_SHOOT, 0.9, 1.1);
+        } catch (ignored) { }
+        try {
+            unit.carrier.getWorld().spawnParticle(Particle.FLAME,
+                loc.clone().add(0.0, 1.4, 0.0), 12, 0.4, 0.5, 0.4, 0.02);
+        } catch (ignored) { }
+    }
+
+    // 每 tick 调用：返回 true = 这一 tick 已由「反击 / 主动攻击」接管
+    function patchRetaliateTick(unit) {
+        try {
+            if (unit == null || unit.dead || unit.transitioning) return false;
+            if (!unit.carrier || !unit.carrier.isValid() || unit.carrier.isDead()) return false;
+            var foe = resolveRetaliateTarget(unit);
+            if (foe == null && isAggressiveAgainstNonFaction()) {
+                foe = patchHostileIfNearer(unit);
+            }
+            if (foe == null) return false;
+            var loc = unit.carrier.getLocation();
+            var tl = foe.getLocation();
+            var dist = Math.sqrt((tl.getX() - loc.getX()) * (tl.getX() - loc.getX())
+                + (tl.getZ() - loc.getZ()) * (tl.getZ() - loc.getZ()));
+            if (dist > PATCH_CHASE_RANGE) {
+                updateMovement(unit, foe);
+            } else {
+                try { faceTarget(unit, tl); } catch (ignored) { }
+            }
+            if (globalTick < unit.nextRetaliateHitTick) return true;
+            if (dist > PATCH_FORCE_RANGE) return true;
+            unit.nextRetaliateHitTick = globalTick + RETALIATE_COOLDOWN_TICKS;
+            try { foe.damage(RETALIATE_DAMAGE, unit.carrier); } catch (ignored) { }
+            patchFx(unit, loc);
+            return true;
+        } catch (e) {
+            log.error("阵营战斗补丁 反击异常：" + e);
+            return false;
+        }
+    }
+    // ===================== 阵营战斗补丁结束 =====================
+
     function updateBoss(boss, uuid) {
         if (boss.dead) {
             updateDeathSequence(boss, uuid);
@@ -4364,6 +4542,10 @@ function drawGuardianLaser(world, from, to) {
 
         // 大型火焰弹红色粒子激光预警（预警结束后自动发射）。
         updateLargeFireballWarning(boss);
+
+        // 阵营战斗补丁：被非同阵营生物实体打过 / 主动模式命中目标 → 本 tick 先反击
+        //（充能 / 吸附等既有状态优先，不打断）
+        if (!boss.charge && !boss.attract && patchRetaliateTick(boss)) return;
 
         if (isHard(boss)) {
             if (globalTick % 5 === 0) refreshHardChargeTargets(boss);

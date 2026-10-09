@@ -1,12 +1,27 @@
 /*
- * WanderingWarlock.js —— 自定义 BOSS「流浪术士」（OpenJS 1.5.0 / Paper 1.21.8）
+ * WanderingWarlockElite.js —— 自定义 BOSS「流浪术士_精英」（OpenJS 1.5.0 / Paper 1.21.8）
  *
- * 获取方式：/call boss 流浪术士
- * 召唤方式：手持名为「流浪术士」的绿宝石右键地面 → 6 秒倒计时 → spawn
+ * 来源：本脚本由 WanderingWarlock.js（流浪术士）派生。两个 BOSS 完全独立、互不干扰：
+ *   · 独立 BOSS_ID / 显示名 / 别名（wandering_warlock_elite）
+ *   · 独立实体 tag / 替身 tag / 投射物 tag（wandering_warlock_elite_*）
+ *   · 独立 PDC 键（boss / clone_owner / bar / mage_armor）与独立运行时状态表
+ *   注意：isOtherCustomBoss() 是靠「scoreboard tag 以 _boss 结尾」识别的，
+ *   所以两个术士会互相认出对方是「其他自定义 BOSS」——这正是辅助法术想要的效果。
+ *
+ * 获取方式：/call boss 流浪术士_精英
+ * 召唤方式：手持名为「流浪术士_精英」的绿宝石右键地面 → 6 秒倒计时 → spawn
+ *
+ * 相对「流浪术士」的全部改动：
+ *   1. 生命值 150 → 300；**所有法术位都连发 2 次**（原版只有戏法连发）；
+ *      金头盔 → 下界合金头盔，附魔 弹射物保护 IV（其余三件仍是金甲）
+ *   2. 更偏辅助：1 级法术位里 护盾术 / 法师护甲 权重 5/5 → 9/9，雷鸣波 2 → 1
+ *      （有队友在场时辅助占比 ≈ 95%；队友都在施法距离外时 = 100%）
+ *   3. 火球术不再瞄准：前摇 1.5 秒 → 0 —— 音效（恶魂警告）一响立刻发射
+ *   4. 闪电束长度 16 格 → 64 格（粒子采样点与预警线随之加密）
  *
  * 机制摘要：
- *   外观：真实骷髅（Skeleton）本体，头 / 胸 / 腿 / 脚 全套金甲，主手 书
- *   数据：HP 100；移动速度 0.24 格/tick（玩家步行约 0.215，略快约 11%）；
+ *   外观：真实骷髅（Skeleton）本体，金甲 + 下界合金头盔（弹射物保护 IV），主手 书
+ *   数据：HP 300；移动速度 0.24 格/tick（玩家步行约 0.215，略快约 11%）；
  *         击退抗性 1.0（完全免疫击退）；免疫火焰 / 爆炸 / 摔落等环境伤害，
  *         只接受玩家造成的伤害；白天不会着火（逐 tick 清火焰 + 取消火焰伤害）
  *   走位：中距离施法者 —— 玩家近于 4 格后退、远于 12 格靠近、中距离横向绕行
@@ -14,13 +29,17 @@
  *     · 火焰箭  ：发射火焰弹，微量伤害并点燃命中目标，可被盾牌防御
  *     · 电爪    ：距离目标 1 格内施展，微量伤害，**无视护甲与盾牌**
  *     · 次级幻影：召唤 1~2 个替身，替身原地站立、被攻击即消失，持续 5 秒
- *   施展 1 级法术（二选一，冷却 30 秒；后两个需要场上有其他自定义 BOSS）：
+ *   施展 1 级法术（冷却 30 秒；辅助两招需要场上有其他自定义 BOSS）：
  *     · 护盾术  ：给另一个自定义 BOSS 套 3 层护盾（每层抵消一次任意来源伤害），持续 60 秒
  *     · 法师护甲：给另一个自定义 BOSS 提升护甲值 +8，持续 120 秒（金光特效）
  *     · 雷鸣波  ：距离目标 2 格内施展，扇形声波击飞 + 微量伤害，可破盾（斧头原理）
  *   施展 2 级法术（二选一，冷却 45 秒）：
  *     · 粉碎音波：在目标附近产生直径 6 格的球形音波，一定伤害，无视护甲、可被盾牌防御
  *     · 灼热射线：向目标发射 3 道热射线，一定伤害并点燃目标（可被盾牌防御）
+ *   施展 3 级法术（冷却 60 秒）：
+ *     · 闪电束  ：1 秒前摇并发出警告，长 **64 格**宽 3 格的蓝白闪电柱，无视护甲与盾牌
+ *   施展 4 级法术（冷却 90 秒）：
+ *     · 火球术  ：**不再瞄准，音效一响立刻发射**，半径 8 格球状爆发，无视盾牌
  *
  * 契约依据：《OpenJS脚本数据契约.md》v1.0.0；实测约束见 M-1 ~ M-20
  */
@@ -46,6 +65,7 @@
     var AttributeInstanceClass = Java.type("org.bukkit.attribute.AttributeInstance");
     var AttributeModifierClass = Java.type("org.bukkit.attribute.AttributeModifier");
     var AttributeModifierOperation = Java.type("org.bukkit.attribute.AttributeModifier$Operation");
+    var Enchantment = Java.type("org.bukkit.enchantments.Enchantment");
     var Particle = Java.type("org.bukkit.Particle");
     var Sound = Java.type("org.bukkit.Sound");
     var PotionEffect = Java.type("org.bukkit.potion.PotionEffect");
@@ -64,6 +84,10 @@
 
     // M-5：Java.type(...) 返回 Nashorn StaticClass，不能当 java.lang.Class 传给 world.spawn。
     var EntityClass = Class.forName("org.bukkit.entity.Entity");
+    // 注意：instanceof 的右操作数必须是 Java.type 的结果！
+    // Class.forName(...) 得到的是 java.lang.Class，用 instanceof 会抛 TypeError 并被
+    // try/catch 吞掉变成静默失效（踩过一次）。
+    var EnemyClass = Java.type("org.bukkit.entity.Enemy");
     var SkeletonClass = Class.forName("org.bukkit.entity.Skeleton");
     var SmallFireballClass = Class.forName("org.bukkit.entity.SmallFireball");
     var LargeFireballClass = Class.forName("org.bukkit.entity.LargeFireball");
@@ -71,14 +95,18 @@
     // -----------------------------------------------------------------------
     // 数值配置
     // -----------------------------------------------------------------------
-    var BOSS_ID = "wandering_warlock";
-    var BOSS_NAME = "流浪术士";
-    var BOSS_ALIASES = ["流浪", "warlock", "wanderingwarlock", "sorcerer"];
+    var BOSS_ID = "wandering_warlock_elite";
+    var BOSS_NAME = "流浪术士_精英";
+    // 别名刻意不与「流浪术士」的别名（流浪 / warlock / wanderingwarlock / sorcerer）重合
+    var BOSS_ALIASES = ["精英术士", "elite_warlock", "warlockelite", "wanderingwarlockelite"];
     var BOSS_LORE = [
-        "生命值：150",
-        "全套金甲，手持一本书（骷髅本体）",
+        "生命值：300",
+        "金甲 + 下界合金头盔（弹射物保护 IV），手持一本书（骷髅本体）",
         "免疫击退；免疫火焰、爆炸、摔落等环境伤害",
         "只接受玩家造成的伤害",
+        "————————————————",
+        "本 BOSS 更偏向辅助：只要有其他自定义 BOSS 在场，1 级法术位几乎只放辅助法术",
+        "所有法术位都连发 2 次（原版只有戏法连发）",
         "————————————————",
         "施展戏法（三选一，一次连发两招，冷却 3 秒）：",
         "· 火焰箭：火焰弹，微量伤害 + 点燃，可被盾牌防御",
@@ -95,14 +123,16 @@
         "· 灼热射线：3 道热射线，一定伤害并点燃目标，可被盾牌防御",
         "————————————————",
         "3 级法术（冷却 60 秒）：",
-        "· 闪电束：1 秒前摇并发出警告，长 16 格宽 3 格的蓝白闪电柱，无视护甲与盾牌，大量伤害",
+        "· 闪电束：1 秒前摇并发出警告，长 64 格宽 3 格的蓝白闪电柱，无视护甲与盾牌，大量伤害",
         "————————————————",
         "4 级法术（冷却 90 秒）：",
-        "· 火球术：1.5 秒前摇并发出警告，无法拦截的火球，半径 8 格球状爆发，无视盾牌，大量伤害"
+        "· 火球术：不再瞄准，音效一响立刻发射，半径 8 格球状爆发，无视盾牌，大量伤害"
     ];
 
     // 生命 / 移动
-    var MAX_HEALTH = 150.0;
+    var MAX_HEALTH = 300.0;               // 精英改动：150 → 300
+    // 精英改动：下界合金头盔的弹射物保护等级
+    var ARMOR_PROJECTILE_PROTECTION_LEVEL = 4;
     var KNOCKBACK_RESISTANCE = 1.0;
     // 速度：玩家步行速度属性 0.1 ≈ 0.215 格/tick；本 BOSS 逐 tick 位移，单位是 格/tick。
     var PLAYER_WALK_ATTRIBUTE = 0.1;
@@ -151,9 +181,10 @@
     // 需求：法术更侧重辅助 —— 护盾术 / 法师护甲权重远高于攻击性的雷鸣波。
     // 注意：这里对 1 级法术不再套用「排除上一招」（pickWeighted 会因此反向抬高
     // 低权重项在稳态下的占比：4:4:2 + 排除时雷鸣波约 25%，5:5:2 不排除才稳定在 1/6）。
-    var ARCANE_SHIELD_WEIGHT = 5;
-    var MAGE_ARMOR_WEIGHT = 5;
-    var THUNDERWAVE_WEIGHT = 2;
+    // 精英改动：更偏辅助 —— 护盾术 / 法师护甲 权重 5/5 → 9/9，雷鸣波 2 → 1
+    var ARCANE_SHIELD_WEIGHT = 9;
+    var MAGE_ARMOR_WEIGHT = 9;
+    var THUNDERWAVE_WEIGHT = 1;
     var SHIELD_CHARGES = 3;               // 需求：3 个护盾环绕
     var SHIELD_DURATION_TICKS = 1200;     // 需求：持续 60 秒
     var SHIELD_CAST_WINDUP_TICKS = 20;
@@ -188,15 +219,15 @@
     // 3 级法术：闪电束（长 16 格 / 宽 3 格的闪电射线，无视护甲与盾牌）
     var SPELL3_COOLDOWN_TICKS = 1200;      // 需求：冷却 60 秒
     var LIGHTNING_BEAM_WINDUP_TICKS = 20;  // 需求：前摇 1 秒
-    var LIGHTNING_BEAM_LENGTH = 16.0;      // 需求：长 16 格
+    var LIGHTNING_BEAM_LENGTH = 64.0;      // 精英改动：长 16 格 → 64 格
     var LIGHTNING_BEAM_RADIUS = 1.5;       // 需求：宽 3 格（半径 1.5）
     var LIGHTNING_BEAM_DAMAGE = 14.0;      // 需求：大量伤害（无视护甲与盾牌）
     var LIGHTNING_BEAM_WARN_RADIUS = 32.0; // 警告广播半径
-    var LIGHTNING_BEAM_STEPS = 40;         // 柱形粒子采样点
+    var LIGHTNING_BEAM_STEPS = 64;         // 精英改动：柱形粒子采样点 40 → 64（配合 64 格长度）
 
     // 4 级法术：火球术（无法拦截 / 半径 8 格球状 / 无视盾牌 / 大量伤害）
     var SPELL4_COOLDOWN_TICKS = 1800;      // 需求：冷却 90 秒
-    var ULT_FIREBALL_WINDUP_TICKS = 30;    // 需求：前摇 1.5 秒
+    var ULT_FIREBALL_WINDUP_TICKS = 0;     // 精英改动：不再瞄准 —— 音效一响立刻发射
     var ULT_FIREBALL_RADIUS = 8.0;         // 需求：半径 8 格球状
     var ULT_FIREBALL_DAMAGE = 16.0;        // 需求：大量伤害（吃护甲、无视盾牌）
     var ULT_FIREBALL_SPEED = 1.25;
@@ -220,13 +251,196 @@
     var DEATH_SEQUENCE_TICKS = 30;
 
     // Tag / PDC key 必须带 BOSS id 前缀，避免跨 BOSS 冲突
-    var BOSS_TAG = "wandering_warlock_boss";
-    var CLONE_TAG = "wandering_warlock_clone";
-    var PROJECTILE_TAG = "wandering_warlock_projectile";
-    var bossKey = new NamespacedKey(plugin, "wandering_warlock_boss_type");
-    var cloneOwnerKey = new NamespacedKey(plugin, "wandering_warlock_clone_owner");
-    var barKey = new NamespacedKey(plugin, "wandering_warlock_bar");
-    var mageArmorKey = new NamespacedKey(plugin, "wandering_warlock_mage_armor");
+    // 精英独立命名：本体 / 替身 / 投射物三种 tag 与四个 PDC 键全部与本体不同。
+    var BOSS_TAG = "wandering_warlock_elite_boss";
+    var CLONE_TAG = "wandering_warlock_elite_clone";
+    var PROJECTILE_TAG = "wandering_warlock_elite_projectile";
+    var bossKey = new NamespacedKey(plugin, "wandering_warlock_elite_boss_type");
+    var cloneOwnerKey = new NamespacedKey(plugin, "wandering_warlock_elite_clone_owner");
+    var barKey = new NamespacedKey(plugin, "wandering_warlock_elite_bar");
+    var mageArmorKey = new NamespacedKey(plugin, "wandering_warlock_elite_mage_armor");
+    // 精英改动：法术连发次数 —— 原版 CANTRIP_CHAIN 只作用于戏法，这里让 1~4 级法术位也连发
+    var SPELL_CHAIN = 2;
+
+    // ---- 「土匪」阵营（与 无爵骑士_精英 / 神射手_精英 同一阵营）----
+    // 统一打上 faction tag（供其它脚本 / 后续调整查询），并加入 scoreboard team，
+    // 让名字带上 [土匪] 前缀。tag 名与队伍名是全局约定，三个脚本必须一致。
+    var FACTION_TAG = "bandit_faction";
+    var FACTION_TEAM = "bandit";
+    var FACTION_PREFIX = ChatColor.DARK_RED + "[土匪] " + ChatColor.RESET;
+
+    function joinFactionTeam(entity) {
+        try {
+            var sb = Bukkit.getScoreboardManager().getMainScoreboard();
+            var team = sb.getTeam(FACTION_TEAM);
+            if (team == null) {
+                team = sb.registerNewTeam(FACTION_TEAM);
+                team.setDisplayName("[土匪]");
+            }
+            team.setPrefix(FACTION_PREFIX);
+            var entry = String(entity.getUniqueId().toString());
+            if (!team.hasEntry(entry)) team.addEntry(entry);
+        } catch (e) {
+            logError("WanderingWarlockElite 加入土匪阵营失败", e);
+        }
+    }
+
+    // ---- 精英改动：阵营友伤 / 反击 ----
+    var RETALIATE_MEMORY_TICKS = 200;      // 挨打后 10 秒内保持反击目标
+    var RETALIATE_COOLDOWN_TICKS = 30;     // 每 1.5 秒还击一次
+    var RETALIATE_DAMAGE = 5.0;            // 反击伤害（约等于一发奥术弹）
+
+    function isFactionAlly(entity) {
+        try {
+            if (entity == null) return false;
+            return entity.getScoreboardTags().contains(FACTION_TAG);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function markRetaliate(boss, attacker) {
+        try {
+            if (attacker == null || !attacker.isValid()) return;
+            if (String(attacker.getUniqueId().toString()) === boss.uuid) return;
+            if (boss.nextRetaliateHitTick == null) boss.nextRetaliateHitTick = 0;
+            boss.retaliateTarget = attacker;
+            boss.retaliateUntilTick = globalTick + RETALIATE_MEMORY_TICKS;
+        } catch (ignored) { }
+    }
+
+    function resolveRetaliateTarget(boss) {
+        var t = boss.retaliateTarget;
+        if (t == null) return null;
+        try {
+            if (!t.isValid() || t.isDead()) { boss.retaliateTarget = null; return null; }
+        } catch (e) {
+            boss.retaliateTarget = null;
+            return null;
+        }
+        if (globalTick > boss.retaliateUntilTick) { boss.retaliateTarget = null; return null; }
+        return t;
+    }
+
+    // ---- 精英改动：是否主动攻击「非同阵营」（为 BOSS 之间的战斗做准备）----
+    // 默认 false = 只反击、不主动出击；可用 /bandit attack on|off 运行时切换
+    //（真正的开关由 BanditTrioElite.js 通过 getShared("BanditFaction") 持有并持久化）。
+    var FALLBACK_ATTACK_NON_FACTION = false;
+    // 敌对目标识别：原版敌对生物（Enemy）+ 按 tag 约定的自定义生物/自定义 BOSS。
+    // 以后新增自定义生物，打上 custom_hostile 标记或让 tag 以 _boss 结尾即可自动纳入。
+    var HOSTILE_TAGS_EXACT = ["custom_hostile"];
+    var HOSTILE_TAG_SUFFIXES = ["_boss"];
+
+    function isAggressiveAgainstNonFaction() {
+        try {
+            var api = getShared("BanditFaction");
+            if (api != null && typeof api.isAggressive === "function") {
+                return api.isAggressive() === true;
+            }
+        } catch (e) { }
+        return FALLBACK_ATTACK_NON_FACTION;
+    }
+
+    function isHostileEntity(entity) {
+        try {
+            if (entity == null || !entity.isValid() || entity.isDead()) return false;
+            if (entity instanceof PlayerClass) return false;
+            if (isFactionAlly(entity)) return false;
+            if (entity instanceof EnemyClass) return true;
+            var tags = entity.getScoreboardTags();
+            var it = tags.iterator();
+            while (it.hasNext()) {
+                var tag = String(it.next());
+                for (var i = 0; i < HOSTILE_TAGS_EXACT.length; i++) {
+                    if (tag === HOSTILE_TAGS_EXACT[i]) return true;
+                }
+                for (var j = 0; j < HOSTILE_TAG_SUFFIXES.length; j++) {
+                    var suf = HOSTILE_TAG_SUFFIXES[j];
+                    if (tag.length > suf.length
+                            && tag.substring(tag.length - suf.length) === suf) return true;
+                }
+            }
+        } catch (e) { }
+        return false;
+    }
+
+    function findNearestHostileEntity(boss) {
+        var best = null;
+        var bestDist = TARGET_RANGE * TARGET_RANGE;
+        try {
+            var it = boss.world.getEntitiesByClass(EntityClass).iterator();
+            while (it.hasNext()) {
+                var e = it.next();
+                if (!isHostileEntity(e)) continue;
+                var d = e.getLocation().distanceSquared(boss.carrier.getLocation());
+                if (d < bestDist) { bestDist = d; best = e; }
+            }
+        } catch (e2) { }
+        return best;
+    }
+
+    function pickHostileIfNearer(boss, playerTarget) {
+        try {
+            var hostile = findNearestHostileEntity(boss);
+            if (hostile == null) return null;
+            if (playerTarget == null) return hostile;
+            var loc = boss.carrier.getLocation();
+            var dh = hostile.getLocation().distanceSquared(loc);
+            var dp = playerTarget.getLocation().distanceSquared(loc);
+            return (dh < dp) ? hostile : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    // 反击：保持施法距离，按冷却「打一发奥术弹」（直接结算伤害 + 紫黑弹道 + 施法音效）
+    function updateRetaliate(boss, foe) {
+        try {
+            var loc = boss.carrier.getLocation();
+            var tl = foe.getLocation();
+            var dx = tl.getX() - loc.getX();
+            var dz = tl.getZ() - loc.getZ();
+            var dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist < KEEP_DISTANCE || dist > PREFERRED_RANGE) {
+                updateMovement(boss, foe);
+            } else {
+                faceTarget(boss, tl);
+            }
+            if (globalTick < boss.nextRetaliateHitTick) return;
+            boss.nextRetaliateHitTick = globalTick + RETALIATE_COOLDOWN_TICKS;
+            try { foe.damage(RETALIATE_DAMAGE, boss.carrier); } catch (ignored) { }
+            playSoundSafe(boss.world, loc, Sound.ENTITY_EVOKER_CAST_SPELL, 1.0, 1.2);
+            var eye = boss.carrier.getEyeLocation();
+            for (var i = 1; i <= 6; i++) {
+                var t = i / 6.0;
+                spawnParticleSafe(boss.world, Particle.WITCH, new Location(boss.world,
+                    eye.getX() + (tl.getX() - eye.getX()) * t,
+                    eye.getY() + 1.0 + (tl.getY() - eye.getY()) * t,
+                    eye.getZ() + (tl.getZ() - eye.getZ()) * t),
+                    1, 0.0, 0.0, 0.0, 0.0);
+            }
+        } catch (e) {
+            logError("WanderingWarlockElite 反击异常", e);
+        }
+    }
+
+    // 精英改动：隐藏全部「法术施展 / 命中」文字提示（聊天栏 + 动作栏 + 标题），
+    // 只保留粒子与音效。改回 false 即可恢复。
+    // 注意：服务端控制台日志（log.info）不受影响，仍然可查。
+    var HIDE_ALL_TEXT = true;
+
+    function eliteSay(who, text) {
+        if (HIDE_ALL_TEXT) return;
+        try { who.sendMessage(text); } catch (ignored) { }
+    }
+    function eliteBar(who, text) {
+        if (HIDE_ALL_TEXT) return;
+        try { who.sendActionBar(text); } catch (ignored) { }
+    }
+    function eliteTitle(who, title, sub, fadeIn, stay, fadeOut) {
+        if (HIDE_ALL_TEXT) return;
+        try { who.sendTitle(title, sub, fadeIn, stay, fadeOut); } catch (ignored) { }
+    }
 
     // 法术标识
     var KIND_FIRE_BOLT = "fire_bolt";
@@ -258,6 +472,7 @@
     var PREFLIGHT_CONSTANTS = [
         String(Material.GOLDEN_HELMET), String(Material.GOLDEN_CHESTPLATE),
         String(Material.GOLDEN_LEGGINGS), String(Material.GOLDEN_BOOTS),
+        String(Material.NETHERITE_HELMET), String(Enchantment.PROJECTILE_PROTECTION),
         String(Material.BOOK), String(Material.EMERALD), String(Material.SHIELD),
         String(Particle.FLAME), String(Particle.SMALL_FLAME), String(Particle.SMOKE),
         String(Particle.LARGE_SMOKE), String(Particle.CLOUD), String(Particle.CRIT),
@@ -323,7 +538,7 @@
                 try {
                     current[i].fn();
                 } catch (e) {
-                    logError("WanderingWarlock 延迟任务异常", e);
+                    logError("WanderingWarlockElite 延迟任务异常", e);
                 }
             } else {
                 syncDelayedTasks.push(current[i]);
@@ -381,7 +596,7 @@
                 }
             }
         } catch (e) {
-            logError("WanderingWarlock 查找最近玩家异常", e);
+            logError("WanderingWarlockElite 查找最近玩家异常", e);
         }
         return best;
     }
@@ -519,12 +734,12 @@
                 var damageType = lookupSonicBoomDamageType();
                 if (damageType != null) {
                     sonicBoomDamageSource = DamageSourceClass.builder(damageType).build();
-                    log.info("WanderingWarlock 已解析 sonic_boom 伤害类型：电爪 / 粉碎音波将无视护甲。");
+                    log.info("WanderingWarlockElite 已解析 sonic_boom 伤害类型：电爪 / 粉碎音波将无视护甲。");
                 } else {
-                    log.warn("WanderingWarlock 未找到 sonic_boom 伤害类型，将回退到普通伤害来源。");
+                    log.warn("WanderingWarlockElite 未找到 sonic_boom 伤害类型，将回退到普通伤害来源。");
                 }
             } catch (e) {
-                log.warn("WanderingWarlock 解析 sonic_boom 失败，将回退到普通伤害来源：" + e);
+                log.warn("WanderingWarlockElite 解析 sonic_boom 失败，将回退到普通伤害来源：" + e);
                 sonicBoomDamageSource = null;
             }
         }
@@ -534,11 +749,23 @@
     // -----------------------------------------------------------------------
     // 生命周期：生成 / 清理
     // -----------------------------------------------------------------------
+    // 精英改动：下界合金头盔 + 弹射物保护 IV（其余三件仍是金甲）
+    function createEliteHelmet() {
+        var helmet = new ItemStack(Material.NETHERITE_HELMET);
+        try {
+            helmet.addUnsafeEnchantment(Enchantment.PROJECTILE_PROTECTION,
+                ARMOR_PROJECTILE_PROTECTION_LEVEL);
+        } catch (e) {
+            logError("WanderingWarlockElite 给下界合金头盔附魔失败", e);
+        }
+        return helmet;
+    }
+
     function equipWarlock(entity) {
         try {
             var equipment = entity.getEquipment();
             if (equipment == null) return;
-            equipment.setHelmet(new ItemStack(Material.GOLDEN_HELMET));
+            equipment.setHelmet(createEliteHelmet());
             equipment.setChestplate(new ItemStack(Material.GOLDEN_CHESTPLATE));
             equipment.setLeggings(new ItemStack(Material.GOLDEN_LEGGINGS));
             equipment.setBoots(new ItemStack(Material.GOLDEN_BOOTS));
@@ -549,7 +776,7 @@
             equipment.setBootsDropChance(0.0);
             equipment.setItemInMainHandDropChance(0.0);
         } catch (e) {
-            logError("WanderingWarlock 穿戴金甲 / 书失败", e);
+            logError("WanderingWarlockElite 穿戴金甲 / 书失败", e);
         }
     }
 
@@ -561,7 +788,7 @@
             bar.setProgress(1.0);
             bar.setVisible(true);
         } catch (e) {
-            logError("WanderingWarlock 创建 BossBar 失败", e);
+            logError("WanderingWarlockElite 创建 BossBar 失败", e);
             bar = null;
         }
         return bar;
@@ -579,7 +806,7 @@
             // M-5：必须传 Class.forName(...) 得到的 java.lang.Class。
             var carrier = world.spawn(spawnLoc, SkeletonClass);
             if (carrier == null) {
-                logError("WanderingWarlock 生成失败", "world.spawn 返回 null");
+                logError("WanderingWarlockElite 生成失败", "world.spawn 返回 null");
                 return false;
             }
 
@@ -596,7 +823,7 @@
             carrier.setCustomNameVisible(false);
             try { carrier.setVisualFire(false); } catch (ignored) { }
             carrier.addScoreboardTag(BOSS_TAG);
-            // 阵营战斗补丁：加入「流寇」阵营
+            // 土匪阵营：faction tag + 加入 [土匪] 队伍
             carrier.addScoreboardTag(FACTION_TAG);
             joinFactionTeam(carrier);
             carrier.getPersistentDataContainer().set(bossKey, PersistentDataType.STRING, BOSS_ID);
@@ -612,7 +839,7 @@
             try {
                 carrier.setHealth(MAX_HEALTH);
             } catch (e) {
-                logError("WanderingWarlock 设置生命值失败", e);
+                logError("WanderingWarlockElite 设置生命值失败", e);
             }
             equipWarlock(carrier);
 
@@ -658,12 +885,12 @@
             playSoundSafe(world, spawnLoc, Sound.ENTITY_SKELETON_AMBIENT, 1.2, 0.8);
             spawnParticleSafe(world, Particle.ENCHANT, spawnLoc, 30, 0.9, 1.2, 0.9, 0.4);
             spawnParticleSafe(world, Particle.WITCH, spawnLoc, 20, 0.8, 1.0, 0.8, 0.02);
-            log.info("WanderingWarlock 生成成功：" + uuid + " @ " + world.getName()
+            log.info("WanderingWarlockElite 生成成功：" + uuid + " @ " + world.getName()
                 + " (" + Math.round(spawnLoc.getX()) + "," + Math.round(spawnLoc.getY())
                 + "," + Math.round(spawnLoc.getZ()) + ")");
             return true;
         } catch (e) {
-            logError("WanderingWarlock 生成失败", e);
+            logError("WanderingWarlockElite 生成失败", e);
             return false;
         }
     }
@@ -711,7 +938,7 @@
             removed++;
         }
         if (removed > 0 && reason != null) {
-            log.info("WanderingWarlock 已清除替身 " + removed + " 个（" + reason + "）");
+            log.info("WanderingWarlockElite 已清除替身 " + removed + " 个（" + reason + "）");
         }
         return removed;
     }
@@ -736,7 +963,7 @@
                 }
             }
         } catch (e) {
-            logError("WanderingWarlock 移除法师护甲异常", e);
+            logError("WanderingWarlockElite 移除法师护甲异常", e);
         }
         delete mageArmorTargets[key];
         return true;
@@ -768,7 +995,7 @@
             }
         } catch (ignored) { }
         delete activeBosses[boss.uuid];
-        log.info("WanderingWarlock 已清理 BOSS：" + boss.uuid);
+        log.info("WanderingWarlockElite 已清理 BOSS：" + boss.uuid);
     }
 
     // M-15：周期性孤儿清理必须跳过本实例还活着的实体
@@ -789,7 +1016,7 @@
                 removed++;
             }
         } catch (e) {
-            logError("WanderingWarlock 清理带 Tag 实体异常", e);
+            logError("WanderingWarlockElite 清理带 Tag 实体异常", e);
         }
         return removed;
     }
@@ -815,7 +1042,7 @@
                     removed++;
                 }
             } catch (e) {
-                logError("WanderingWarlock 清理孤儿火焰弹异常", e);
+                logError("WanderingWarlockElite 清理孤儿火焰弹异常", e);
             }
         }
         return removed;
@@ -826,7 +1053,7 @@
         try {
             Bukkit.removeBossBar(barKey);
         } catch (e) {
-            logError("WanderingWarlock 清理孤儿 BossBar 异常", e);
+            logError("WanderingWarlockElite 清理孤儿 BossBar 异常", e);
         }
     }
 
@@ -841,9 +1068,9 @@
                 removed += removeOrphanProjectiles(world);
             }
             cleanupOrphanBossBars();
-            if (removed > 0) log.info("WanderingWarlock 清理孤儿实体 / 火焰弹：" + removed + " 个。");
+            if (removed > 0) log.info("WanderingWarlockElite 清理孤儿实体 / 火焰弹：" + removed + " 个。");
         } catch (e) {
-            logError("WanderingWarlock 清理孤儿实体异常", e);
+            logError("WanderingWarlockElite 清理孤儿实体异常", e);
         }
     }
 
@@ -874,18 +1101,18 @@
                     handle.setXRot(pitch);
                     if (headRotationViaNms === null) {
                         headRotationViaNms = true;
-                        log.info("WanderingWarlock 头部朝向：已启用 NMS 直接写入（setYHeadRot/setYBodyRot）。");
+                        log.info("WanderingWarlockElite 头部朝向：已启用 NMS 直接写入（setYHeadRot/setYBodyRot）。");
                     }
                 } catch (e) {
                     if (headRotationViaNms === null) {
                         headRotationViaNms = false;
-                        log.warn("WanderingWarlock 头部朝向：NMS 通道不可用，退化为 setRotation + lookAt（"
+                        log.warn("WanderingWarlockElite 头部朝向：NMS 通道不可用，退化为 setRotation + lookAt（"
                             + e + "）。");
                     }
                 }
             }
         } catch (e) {
-            logError("WanderingWarlock 朝向计算异常", e);
+            logError("WanderingWarlockElite 朝向计算异常", e);
         }
         boss.faceYaw = yaw;
         boss.facePitch = pitch;
@@ -960,7 +1187,7 @@
                 stepToward(boss, -sideX, -sideZ, STRAFE_SPEED);
             }
         } catch (e) {
-            logError("WanderingWarlock 移动异常", e);
+            logError("WanderingWarlockElite 移动异常", e);
         }
     }
 
@@ -1018,7 +1245,7 @@
             playSoundSafe(player.getWorld(), player.getLocation(), Sound.ITEM_SHIELD_BREAK, 1.5, 0.9);
         } catch (ignored) { }
         try {
-            player.sendMessage(ChatColor.DARK_PURPLE + "[" + BOSS_NAME + "] " + ChatColor.RED
+            eliteSay(player, ChatColor.DARK_PURPLE + "[" + BOSS_NAME + "] " + ChatColor.RED
                 + "雷鸣波震碎了你的盾牌！" + ChatColor.GRAY + "（"
                 + (SHIELD_DISABLE_TICKS / 20) + " 秒内无法格挡）");
         } catch (ignored) { }
@@ -1040,7 +1267,7 @@
                 player.damage(amount);
             }
         } catch (e) {
-            logError("WanderingWarlock 造成伤害失败", e);
+            logError("WanderingWarlockElite 造成伤害失败", e);
             return false;
         }
         try {
@@ -1070,7 +1297,7 @@
                 player.damage(amount);
             }
         } catch (e) {
-            logError("WanderingWarlock 造成无视护甲伤害失败", e);
+            logError("WanderingWarlockElite 造成无视护甲伤害失败", e);
             return false;
         }
         try {
@@ -1126,7 +1353,7 @@
                 if (dot >= dotMin) result.push(p);
             }
         } catch (e) {
-            logError("WanderingWarlock 扇形目标收集异常", e);
+            logError("WanderingWarlockElite 扇形目标收集异常", e);
         }
         return result;
     }
@@ -1140,7 +1367,7 @@
         try {
             if (!(entity instanceof LivingEntityClass)) return false;
             if (entity.getUniqueId().equals(boss.carrier.getUniqueId())) return false;
-            // 阵营战斗补丁：辅助法术（护盾术 / 法师护甲）只作用于「流寇」阵营的实体，
+            // 精英改动：辅助法术（护盾术 / 法师护甲）只作用于「土匪」阵营的实体，
             // 不再按「tag 以 _boss 结尾」识别任意自定义 BOSS。
             return entity.getScoreboardTags().contains(FACTION_TAG);
         } catch (e) {
@@ -1188,7 +1415,7 @@
                 }
             }
         } catch (e2) {
-            logError("WanderingWarlock 查找其他自定义 BOSS 异常", e2);
+            logError("WanderingWarlockElite 查找其他自定义 BOSS 异常", e2);
         }
         return (nearestUnbuffed != null) ? nearestUnbuffed : nearest;
     }
@@ -1224,7 +1451,7 @@
         playSoundSafe(targetEntity.getWorld(), loc, Sound.BLOCK_BEACON_POWER_SELECT, 1.2, 1.4);
         spawnParticleSafe(targetEntity.getWorld(), Particle.END_ROD, loc, 40, 0.8, 1.2, 0.8, 0.05);
         spawnParticleSafe(targetEntity.getWorld(), Particle.ENCHANT, loc, 30, 1.0, 1.2, 1.0, 0.5);
-        log.info("WanderingWarlock 护盾术：为 " + protectedBosses[uuid].name + " 套上 "
+        log.info("WanderingWarlockElite 护盾术：为 " + protectedBosses[uuid].name + " 套上 "
             + SHIELD_CHARGES + " 层护盾（" + (SHIELD_DURATION_TICKS / 20) + " 秒）。");
         return true;
     }
@@ -1240,7 +1467,7 @@
                 AttributeModifierOperation.ADD_NUMBER);
             inst.addModifier(modifier);
         } catch (e) {
-            logError("WanderingWarlock 法师护甲添加护甲修饰符失败", e);
+            logError("WanderingWarlockElite 法师护甲添加护甲修饰符失败", e);
             return false;
         }
         mageArmorTargets[uuid] = {
@@ -1254,7 +1481,7 @@
         playSoundSafe(targetEntity.getWorld(), loc, Sound.BLOCK_ENCHANTMENT_TABLE_USE, 1.3, 1.2);
         spawnParticleSafe(targetEntity.getWorld(), Particle.WAX_ON, loc, 30, 0.8, 1.2, 0.8, 0.0);
         spawnParticleSafe(targetEntity.getWorld(), Particle.END_ROD, loc, 20, 0.8, 1.2, 0.8, 0.03);
-        log.info("WanderingWarlock 法师护甲：为 " + mageArmorTargets[uuid].name + " 提升护甲 +"
+        log.info("WanderingWarlockElite 法师护甲：为 " + mageArmorTargets[uuid].name + " 提升护甲 +"
             + MAGE_ARMOR_BONUS + "（" + (MAGE_ARMOR_DURATION_TICKS / 20) + " 秒）。");
         return true;
     }
@@ -1360,7 +1587,7 @@
             spawnParticleSafe(world, Particle.ENCHANT, loc.clone().add(0, 1.0, 0), 20, 0.5, 0.9, 0.5, 0.4);
             return clone;
         } catch (e) {
-            logError("WanderingWarlock 召唤替身失败", e);
+            logError("WanderingWarlockElite 召唤替身失败", e);
             return null;
         }
     }
@@ -1380,7 +1607,7 @@
         }
         playSoundSafe(boss.world, loc, Sound.ENTITY_ILLUSIONER_MIRROR_MOVE, 1.5, 1.0);
         playSoundSafe(boss.world, loc, Sound.ENTITY_ILLUSIONER_CAST_SPELL, 1.3, 1.2);
-        log.info("WanderingWarlock 次级幻影：召唤替身 " + spawned + " 个（持续 "
+        log.info("WanderingWarlockElite 次级幻影：召唤替身 " + spawned + " 个（持续 "
             + (ILLUSION_LIFE_TICKS / 20) + " 秒）。");
         return spawned;
     }
@@ -1422,7 +1649,7 @@
             }
         } catch (ignored) { }
         delete activeClones[clone.uuid];
-        if (reason != null) log.info("WanderingWarlock 替身被击破（" + reason + "）。");
+        if (reason != null) log.info("WanderingWarlockElite 替身被击破（" + reason + "）。");
     }
 
     // -----------------------------------------------------------------------
@@ -1455,7 +1682,7 @@
             playSoundSafe(boss.world, loc, Sound.ITEM_FIRECHARGE_USE, 1.0, 1.1);
             return ball;
         } catch (e) {
-            logError("WanderingWarlock 发射火焰弹失败", e);
+            logError("WanderingWarlockElite 发射火焰弹失败", e);
             return null;
         }
     }
@@ -1470,7 +1697,7 @@
         if (!dealt) return "noeffect";
         ignitePlayer(player, FIRE_BOLT_BURN_TICKS);
         try {
-            player.sendMessage(ChatColor.GOLD + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+            eliteSay(player, ChatColor.GOLD + "[" + BOSS_NAME + "] " + ChatColor.GRAY
                 + "火焰箭命中：你被点燃了（" + (FIRE_BOLT_BURN_TICKS / 20) + " 秒）。");
         } catch (ignored) { }
         return "hit";
@@ -1582,8 +1809,8 @@
                 if (p.getLocation().distanceSquared(boss.carrier.getLocation())
                         > LIGHTNING_BEAM_WARN_RADIUS * LIGHTNING_BEAM_WARN_RADIUS) continue;
                 try {
-                    p.sendTitle(title, subtitle, 0, 25, 5);
-                    p.sendActionBar(actionText);
+                    eliteTitle(p, title, subtitle, 0, 25, 5);
+                    eliteBar(p, actionText);
                 } catch (ignored) { }
                 try {
                     playSoundSafe(boss.world, p.getLocation(), sound, 1.6, pitch);
@@ -1591,10 +1818,10 @@
                 warned++;
             }
         } catch (e) {
-            logError("WanderingWarlock 施法警告异常", e);
+            logError("WanderingWarlockElite 施法警告异常", e);
         }
         // 运行日志：重技能前摇的警告广播人数（便于排障，不属于调试日志）
-        log.info("WanderingWarlock 施法警告：" + ChatColor.stripColor(title) + " → " + warned + " 人");
+        log.info("WanderingWarlockElite 施法警告：" + ChatColor.stripColor(title) + " → " + warned + " 人");
         return warned;
     }
 
@@ -1610,7 +1837,7 @@
         var dealt = dealArcaneDamage(player, LIGHTNING_BEAM_DAMAGE, boss);
         if (!dealt) return "noeffect";
         try {
-            player.sendMessage(ChatColor.AQUA + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+            eliteSay(player, ChatColor.AQUA + "[" + BOSS_NAME + "] " + ChatColor.GRAY
                 + "闪电束贯穿了你（" + LIGHTNING_BEAM_DAMAGE + " 点，无视护甲与盾牌）。");
         } catch (ignored) { }
         return "hit";
@@ -1677,7 +1904,7 @@
                 if (status === "hit") hit++;
             }
         } catch (e) {
-            logError("WanderingWarlock 闪电束结算异常", e);
+            logError("WanderingWarlockElite 闪电束结算异常", e);
         }
         act.hitOk = hit;
         return (hit > 0) ? "hit" : "cast";
@@ -1713,7 +1940,7 @@
             playSoundSafe(boss.world, loc, Sound.ITEM_FIRECHARGE_USE, 1.4, 0.9);
             return ball;
         } catch (e) {
-            logError("WanderingWarlock 发射火球术失败", e);
+            logError("WanderingWarlockElite 发射火球术失败", e);
             return null;
         }
     }
@@ -1739,7 +1966,7 @@
             player.setVelocity(push);
         } catch (ignored) { }
         try {
-            player.sendMessage(ChatColor.DARK_RED + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+            eliteSay(player, ChatColor.DARK_RED + "[" + BOSS_NAME + "] " + ChatColor.GRAY
                 + "火球术命中（" + Math.round(damage) + " 点"
                 + (clear ? "" : "，被掩体削弱") + "）。");
         } catch (ignored) { }
@@ -1776,9 +2003,9 @@
                 if (status === "hit") hit++;
             }
         } catch (e) {
-            logError("WanderingWarlock 火球术爆炸结算异常", e);
+            logError("WanderingWarlockElite 火球术爆炸结算异常", e);
         }
-        log.info("WanderingWarlock 火球术引爆：半径 " + ULT_FIREBALL_RADIUS + " 格，命中 " + hit + " 人。");
+        log.info("WanderingWarlockElite 火球术引爆：半径 " + ULT_FIREBALL_RADIUS + " 格，命中 " + hit + " 人。");
         return hit;
     }
 
@@ -2057,8 +2284,10 @@
             spawnParticleSafe(boss.world, Particle.END_ROD, eye, 4, 0.3, 0.3, 0.3, 0.02);
             var beamDir = act.beamDir;
             if (beamDir != null) {
-                for (var bi = 1; bi <= 14; bi++) {
-                    var bt = bi / 14.0;
+                // 精英改动：警告线采样点 14 → 40（64 格光束需要更密的点才对得上）
+                var warnSteps = 40;
+                for (var bi = 1; bi <= warnSteps; bi++) {
+                    var bt = bi / warnSteps;
                     spawnParticleSafe(boss.world, Particle.SOUL_FIRE_FLAME, new Location(boss.world,
                         eye.getX() + beamDir.getX() * LIGHTNING_BEAM_LENGTH * bt,
                         eye.getY() + beamDir.getY() * LIGHTNING_BEAM_LENGTH * bt,
@@ -2086,7 +2315,7 @@
             act.fizzled = true;
             spawnParticleSafe(boss.world, Particle.ELECTRIC_SPARK, eye, 10, 0.4, 0.4, 0.4, 0.05);
             try {
-                target.sendActionBar(ChatColor.AQUA + "你躲开了电爪！");
+                eliteBar(target, ChatColor.AQUA + "你躲开了电爪！");
             } catch (ignored) { }
             return "fizzle";
         }
@@ -2098,7 +2327,7 @@
         playSoundSafe(boss.world, loc, Sound.ENTITY_LIGHTNING_BOLT_IMPACT, 0.9, 1.6);
         playSoundSafe(boss.world, loc, Sound.BLOCK_AMETHYST_BLOCK_CHIME, 1.2, 1.6);
         try {
-            target.sendMessage(ChatColor.AQUA + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+            eliteSay(target, ChatColor.AQUA + "[" + BOSS_NAME + "] " + ChatColor.GRAY
                 + "电爪穿过护甲与盾牌命中了你（" + GRASP_DAMAGE + " 点）。");
         } catch (ignored) { }
         return dealt ? "hit" : "noeffect";
@@ -2126,7 +2355,7 @@
         if (!dealt) return "noeffect";
         knockbackPlayerFrom(boss, player, THUNDERWAVE_KNOCKBACK, THUNDERWAVE_LAUNCH_UP);
         try {
-            player.sendMessage(ChatColor.DARK_PURPLE + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+            eliteSay(player, ChatColor.DARK_PURPLE + "[" + BOSS_NAME + "] " + ChatColor.GRAY
                 + "雷鸣波把你击飞了！");
         } catch (ignored) { }
         return "hit";
@@ -2154,7 +2383,7 @@
             act.fizzled = true;
             spawnParticleSafe(boss.world, Particle.CLOUD, eye, 10, 0.4, 0.4, 0.4, 0.03);
             try {
-                target.sendActionBar(ChatColor.GRAY + "你及时拉开了距离，雷鸣波落空。");
+                eliteBar(target, ChatColor.GRAY + "你及时拉开了距离，雷鸣波落空。");
             } catch (ignored) { }
             return "fizzle";
         }
@@ -2232,7 +2461,7 @@
                 else if (status === "hit") hit++;
             }
         } catch (e) {
-            logError("WanderingWarlock 粉碎音波结算异常", e);
+            logError("WanderingWarlockElite 粉碎音波结算异常", e);
         }
         act.blockedCount = blocked;
         act.hitOk = hit;
@@ -2294,7 +2523,7 @@
         if (!dealt) return "noeffect";
         ignitePlayer(target, RAY_BURN_TICKS);
         try {
-            target.sendMessage(ChatColor.GOLD + "[" + BOSS_NAME + "] " + ChatColor.GRAY
+            eliteSay(target, ChatColor.GOLD + "[" + BOSS_NAME + "] " + ChatColor.GRAY
                 + "灼热射线命中：你被点燃了（" + (RAY_BURN_TICKS / 20) + " 秒）。");
         } catch (ignored) { }
         return "hit";
@@ -2338,14 +2567,20 @@
 
     function finishCast(boss, act) {
         if (boss.action === act) boss.action = null;
-        // 戏法连发：第一招结束后立刻接第二招（冷却仍按连发起点算）
-        // 目标沿用上一招的目标，目标不可用时才重新索敌
-        if (act.slot === SLOT_CANTRIP && act.chainLeft > 0) {
+        // 精英改动：**所有法术位**都连发 2 次（原版只有戏法连发）。
+        // 戏法：第二招重新随机；1~4 级法术位：同一招再放一次。
+        // 冷却仍按「连发的第一招」起算，与戏法口径一致。
+        if (act.chainLeft > 0) {
             var target = (act.targetRef != null && isEngageablePlayer(act.targetRef))
                 ? act.targetRef : findNearestPlayer(boss);
             if (target != null) {
-                startCantripCast(boss, target, act.chainLeft - 1, act.chainStartTick);
-                return;
+                if (act.slot === SLOT_CANTRIP) {
+                    startCantripCast(boss, target, act.chainLeft - 1, act.chainStartTick);
+                } else {
+                    beginCast(boss, act.slot, act.spell, target, act.chainLeft - 1,
+                        act.chainStartTick);
+                }
+                return null;
             }
         }
         return null;
@@ -2381,172 +2616,13 @@
     // -----------------------------------------------------------------------
     // 战斗总控
     // -----------------------------------------------------------------------
-    // =======================================================================
-    // 阵营战斗补丁（与精英三人组同构；本体三人组同属「流寇」阵营）
-    // =======================================================================
-    var FACTION_TAG = "liukou_faction";
-    var FACTION_TEAM = "liukou";
-    var FACTION_PREFIX = ChatColor.DARK_GRAY + "[流寇] " + ChatColor.RESET;
-    var PATCH_ENTITY_CLASS = Class.forName("org.bukkit.entity.Entity");
-    // 注意：instanceof 的右操作数必须用 Java.type（Class.forName 的结果不能用于 instanceof）
-    var PATCH_ENEMY_CLASS = Java.type("org.bukkit.entity.Enemy");
-
-    var FALLBACK_ATTACK_NON_FACTION = false;
-    var HOSTILE_TAGS_EXACT = ["custom_hostile"];
-    var HOSTILE_TAG_SUFFIXES = ["_boss"];
-    var RETALIATE_MEMORY_TICKS = 200;
-    var RETALIATE_COOLDOWN_TICKS = 30;
-    var RETALIATE_DAMAGE = 4.0;
-
-    function joinFactionTeam(entity) {
-        try {
-            var sb = Bukkit.getScoreboardManager().getMainScoreboard();
-            var team = sb.getTeam(FACTION_TEAM);
-            if (team == null) {
-                team = sb.registerNewTeam(FACTION_TEAM);
-                team.setDisplayName("[流寇]");
-            }
-            team.setPrefix(FACTION_PREFIX);
-            var entry = String(entity.getUniqueId().toString());
-            if (!team.hasEntry(entry)) team.addEntry(entry);
-        } catch (e) {
-            logError("WanderingWarlock 加入流寇阵营失败", e);
-        }
-    }
-
-    function isFactionAlly(entity) {
-        try {
-            if (entity == null) return false;
-            return entity.getScoreboardTags().contains(FACTION_TAG);
-        } catch (e) {
-            return false;
-        }
-    }
-
-    function markRetaliate(boss, attacker) {
-        try {
-            if (attacker == null || !attacker.isValid()) return;
-            if (String(attacker.getUniqueId().toString()) === boss.uuid) return;
-            if (boss.nextRetaliateHitTick == null) boss.nextRetaliateHitTick = 0;
-            boss.retaliateTarget = attacker;
-            boss.retaliateUntilTick = globalTick + RETALIATE_MEMORY_TICKS;
-        } catch (ignored) { }
-    }
-
-    function resolveRetaliateTarget(boss) {
-        var t = boss.retaliateTarget;
-        if (t == null) return null;
-        try {
-            if (!t.isValid() || t.isDead()) { boss.retaliateTarget = null; return null; }
-        } catch (e) {
-            boss.retaliateTarget = null;
-            return null;
-        }
-        if (globalTick > boss.retaliateUntilTick) { boss.retaliateTarget = null; return null; }
-        return t;
-    }
-
-    function isAggressiveAgainstNonFaction() {
-        try {
-            var api = getShared("FactionSettings");
-            if (api == null) api = getShared("BanditFaction");
-            if (api != null && typeof api.isAggressive === "function") {
-                return api.isAggressive() === true;
-            }
-        } catch (e) { }
-        return FALLBACK_ATTACK_NON_FACTION;
-    }
-
-    function isHostileEntity(entity) {
-        try {
-            if (entity == null || !entity.isValid() || entity.isDead()) return false;
-            if (entity instanceof PlayerClass) return false;
-            if (isFactionAlly(entity)) return false;
-            if (entity instanceof PATCH_ENEMY_CLASS) return true;
-            var tags = entity.getScoreboardTags();
-            var it = tags.iterator();
-            while (it.hasNext()) {
-                var tag = String(it.next());
-                for (var i = 0; i < HOSTILE_TAGS_EXACT.length; i++) {
-                    if (tag === HOSTILE_TAGS_EXACT[i]) return true;
-                }
-                for (var j = 0; j < HOSTILE_TAG_SUFFIXES.length; j++) {
-                    var suf = HOSTILE_TAG_SUFFIXES[j];
-                    if (tag.length > suf.length
-                            && tag.substring(tag.length - suf.length) === suf) return true;
-                }
-            }
-        } catch (e) { }
-        return false;
-    }
-
-    function findNearestHostileEntity(boss) {
-        var best = null;
-        var bestDist = TARGET_RANGE * TARGET_RANGE;
-        try {
-            var it = boss.world.getEntitiesByClass(PATCH_ENTITY_CLASS).iterator();
-            while (it.hasNext()) {
-                var e = it.next();
-                if (!isHostileEntity(e)) continue;
-                var d = e.getLocation().distanceSquared(boss.carrier.getLocation());
-                if (d < bestDist) { bestDist = d; best = e; }
-            }
-        } catch (e2) { }
-        return best;
-    }
-
-    function pickHostileIfNearer(boss, playerTarget) {
-        try {
-            var hostile = findNearestHostileEntity(boss);
-            if (hostile == null) return null;
-            if (playerTarget == null) return hostile;
-            var loc = boss.carrier.getLocation();
-            var dh = hostile.getLocation().distanceSquared(loc);
-            var dp = playerTarget.getLocation().distanceSquared(loc);
-            return (dh < dp) ? hostile : null;
-        } catch (e) {
-            return null;
-        }
-    }
-
-    // 反击：保持施法距离，按冷却打一发奥术弹
-    function updateRetaliate(boss, foe) {
-        try {
-            var loc = boss.carrier.getLocation();
-            var tl = foe.getLocation();
-            var dx = tl.getX() - loc.getX();
-            var dz = tl.getZ() - loc.getZ();
-            var dist = Math.sqrt(dx * dx + dz * dz);
-            if (dist < KEEP_DISTANCE || dist > PREFERRED_RANGE) {
-                updateMovement(boss, foe);
-            } else {
-                try { faceTarget(boss, tl); } catch (ignored) { }
-            }
-            if (globalTick < boss.nextRetaliateHitTick) return;
-            boss.nextRetaliateHitTick = globalTick + RETALIATE_COOLDOWN_TICKS;
-            try { foe.damage(RETALIATE_DAMAGE, boss.carrier); } catch (ignored) { }
-            playSoundSafe(boss.world, loc, Sound.ENTITY_EVOKER_CAST_SPELL, 1.0, 1.2);
-            var eye = boss.carrier.getEyeLocation();
-            for (var i = 1; i <= 6; i++) {
-                var t = i / 6.0;
-                spawnParticleSafe(boss.world, Particle.WITCH, new Location(boss.world,
-                    eye.getX() + (tl.getX() - eye.getX()) * t,
-                    eye.getY() + 1.0 + (tl.getY() - eye.getY()) * t,
-                    eye.getZ() + (tl.getZ() - eye.getZ()) * t),
-                    1, 0.0, 0.0, 0.0, 0.0);
-            }
-        } catch (e) {
-            logError("WanderingWarlock 反击异常", e);
-        }
-    }
-    // ===================== 阵营战斗补丁结束 =====================
-
     function updateCombat(boss) {
         var target = findNearestPlayer(boss);
         boss.target = target;
 
-        // 阵营战斗补丁：反击优先 + 主动攻击模式（谁近打谁）
+        // 精英改动 1：反击优先 —— 被非同阵营的生物实体打过就先还击
         var foe = resolveRetaliateTarget(boss);
+        // 精英改动 2：主动攻击模式（/bandit attack on）—— 敌对实体比玩家更近就先打它
         if (foe == null && isAggressiveAgainstNonFaction()) {
             foe = pickHostileIfNearer(boss, target);
         }
@@ -2570,28 +2646,28 @@
         if (globalTick >= boss.nextSpell4Tick) {
             var spell4 = pickSpell4(boss, target);
             if (spell4 != null) {
-                beginCast(boss, SLOT_SPELL4, spell4, target, 0, globalTick);
+                beginCast(boss, SLOT_SPELL4, spell4, target, SPELL_CHAIN - 1, globalTick);
                 return;
             }
         }
         if (globalTick >= boss.nextSpell3Tick) {
             var spell3 = pickSpell3(boss, target);
             if (spell3 != null) {
-                beginCast(boss, SLOT_SPELL3, spell3, target, 0, globalTick);
+                beginCast(boss, SLOT_SPELL3, spell3, target, SPELL_CHAIN - 1, globalTick);
                 return;
             }
         }
         if (globalTick >= boss.nextSpell2Tick) {
             var spell2 = pickSpell2(boss, target);
             if (spell2 != null) {
-                beginCast(boss, SLOT_SPELL2, spell2, target, 0, globalTick);
+                beginCast(boss, SLOT_SPELL2, spell2, target, SPELL_CHAIN - 1, globalTick);
                 return;
             }
         }
         if (globalTick >= boss.nextSpell1Tick) {
             var spell1 = pickSpell1(boss, target);
             if (spell1 != null) {
-                beginCast(boss, SLOT_SPELL1, spell1, target, 0, globalTick);
+                beginCast(boss, SLOT_SPELL1, spell1, target, SPELL_CHAIN - 1, globalTick);
                 return;
             }
         }
@@ -2651,7 +2727,7 @@
             spawnParticleSafe(boss.world, Particle.SQUID_INK, boss.deathLocation, 30, 0.8, 1.0, 0.8, 0.05);
             spawnParticleSafe(boss.world, Particle.ENCHANT, boss.deathLocation, 40, 0.9, 1.2, 0.9, 0.5);
         }
-        log.info("WanderingWarlock 进入死亡序列：" + boss.uuid);
+        log.info("WanderingWarlockElite 进入死亡序列：" + boss.uuid);
     }
 
     function updateDeathSequence(boss) {
@@ -2659,7 +2735,7 @@
             spawnParticleSafe(boss.world, Particle.WITCH, boss.deathLocation, 8, 0.6, 0.8, 0.6, 0.02);
         }
         if (globalTick >= boss.deathEndTick) {
-            log.info("WanderingWarlock 死亡序列完成。");
+            log.info("WanderingWarlockElite 死亡序列完成。");
             cleanupBoss(boss);
         }
     }
@@ -2688,7 +2764,7 @@
             try {
                 updateBoss(boss);
             } catch (e) {
-                logError("WanderingWarlock BOSS[" + uuids[i] + "] tick 异常", e);
+                logError("WanderingWarlockElite BOSS[" + uuids[i] + "] tick 异常", e);
             }
         }
     }
@@ -2728,7 +2804,7 @@
                             spawnParticleSafe(entity.getWorld(), Particle.END_ROD, ploc, 25, 0.8, 1.0, 0.8, 0.05);
                             spawnParticleSafe(entity.getWorld(), Particle.CRIT, ploc, 15, 0.7, 0.9, 0.7, 0.1);
                         } catch (ignored) { }
-                        log.info("WanderingWarlock 护盾术抵消了一次伤害：" + prot.name
+                        log.info("WanderingWarlockElite 护盾术抵消了一次伤害：" + prot.name
                             + " 剩余护盾 " + prot.charges + " 层。");
                         if (prot.charges <= 0) delete protectedBosses[protectedUuid];
                         return;
@@ -2755,7 +2831,8 @@
                     if (attacker == null) attacker = source.getDirectEntity();
                 }
                 if (attacker != null && !(attacker instanceof PlayerClass)) {
-                    // 阵营战斗补丁：可被非同阵营生物实体伤害并反击；同阵营（流寇）友伤关闭
+                    // 精英改动：可以被其它生物实体（小怪 / 非同阵营的自定义 BOSS）伤害，
+                    // 并进入反击状态；同阵营（土匪）之间关闭友伤。
                     if (isFactionAlly(attacker)) {
                         event.setCancelled(true);
                         return;
@@ -2763,7 +2840,7 @@
                     markRetaliate(boss, attacker);
                 }
             } catch (e) {
-                logError("WanderingWarlock 受伤事件异常", e);
+                logError("WanderingWarlockElite 受伤事件异常", e);
             }
         });
 
@@ -2783,7 +2860,7 @@
                         6, 0.4, 0.4, 0.4, 0.05);
                 }
             } catch (e) {
-                logError("WanderingWarlock 近战/远程事件异常", e);
+                logError("WanderingWarlockElite 近战/远程事件异常", e);
             }
         });
 
@@ -2813,7 +2890,7 @@
                     resolveProjectileImpact(boss, entry.kind, hitPlayer, loc);
                 }
             } catch (e) {
-                logError("WanderingWarlock 火焰弹命中事件异常", e);
+                logError("WanderingWarlockElite 火焰弹命中事件异常", e);
             }
         });
 
@@ -2825,7 +2902,7 @@
                 if (!ent.getScoreboardTags().contains(PROJECTILE_TAG)) return;
                 event.setCancelled(true);
             } catch (e) {
-                logError("WanderingWarlock 爆炸预备事件异常", e);
+                logError("WanderingWarlockElite 爆炸预备事件异常", e);
             }
         });
 
@@ -2851,7 +2928,7 @@
                 } catch (ignored) { }
                 startDeathSequence(boss);
             } catch (e) {
-                logError("WanderingWarlock 死亡事件异常", e);
+                logError("WanderingWarlockElite 死亡事件异常", e);
             }
         });
 
@@ -2865,27 +2942,27 @@
         try {
             processSyncDelayedTasks();
         } catch (e) {
-            logError("WanderingWarlock 延迟队列异常", e);
+            logError("WanderingWarlockElite 延迟队列异常", e);
         }
         try {
             updateAllBosses();
         } catch (e) {
-            logError("WanderingWarlock 主循环异常", e);
+            logError("WanderingWarlockElite 主循环异常", e);
         }
         try {
             updateClones();
         } catch (e) {
-            logError("WanderingWarlock 替身推进异常", e);
+            logError("WanderingWarlockElite 替身推进异常", e);
         }
         try {
             updateTrackedProjectiles();
         } catch (e) {
-            logError("WanderingWarlock 火焰弹推进异常", e);
+            logError("WanderingWarlockElite 火焰弹推进异常", e);
         }
         try {
             updateBuffs();
         } catch (e) {
-            logError("WanderingWarlock 增益维护异常", e);
+            logError("WanderingWarlockElite 增益维护异常", e);
         }
     });
 
@@ -2911,7 +2988,7 @@
                 registeredThisInstance = true;
             }
         } catch (e) {
-            logError("WanderingWarlock 注册异常", e);
+            logError("WanderingWarlockElite 注册异常", e);
         }
     }
 
@@ -2921,5 +2998,5 @@
     // -----------------------------------------------------------------------
     // 启动日志
     // -----------------------------------------------------------------------
-    log.info("WanderingWarlock 已加载：使用 /call boss " + BOSS_NAME + " 获取召唤绿宝石。");
+    log.info("WanderingWarlockElite 已加载：使用 /call boss " + BOSS_NAME + " 获取召唤绿宝石。");
 })();
